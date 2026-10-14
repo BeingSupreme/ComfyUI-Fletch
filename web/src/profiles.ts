@@ -9,8 +9,9 @@ export type Family =
   | "flux_dev"
   | "flux_schnell"
   | "flux2_klein"
-  | "flux2_klein_base";
-export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2";
+  | "flux2_klein_base"
+  | "krea2_turbo";
+export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2" | "krea2";
 export type Shape = "square" | "portrait" | "wide";
 export type Quality = "fast" | "balanced" | "best";
 
@@ -19,8 +20,9 @@ export interface Profile {
   /**
    * How the model is wired. "sd" and "flux1" sample with KSampler; "flux2" uses ComfyUI's
    * FLUX.2 graph (Flux2Scheduler + CFGGuider + SamplerCustomAdvanced) and a Qwen3 encoder.
+   * "krea2" samples with KSampler, a Qwen3-VL encoder and the Qwen Image VAE.
    */
-  arch: "sd" | "flux1" | "flux2";
+  arch: "sd" | "flux1" | "flux2" | "krea2";
   /** Architecture its LoRAs are trained on. */
   loraBase: LoraBase;
   sizes: Record<Shape, [width: number, height: number]>;
@@ -30,7 +32,7 @@ export interface Profile {
   scheduler: string;
   /** 1 = use every CLIP layer; 2 = skip the last one (CLIPSetLastLayer -2). */
   clipSkip: number;
-  /** False hides the "Avoid" box (Flux ignores negative prompts at CFG 1). */
+  /** False for distilled models, which ignore the negative prompt unless CFG is raised above 1. */
   negative: boolean;
   /** Flux distilled guidance, applied with FluxGuidance. */
   guidance?: number;
@@ -155,10 +157,29 @@ export const PROFILES: Record<Family, Profile> = {
     negative: true,
     latent: "EmptyFlux2LatentImage",
   },
+  // Follows ComfyUI's Krea 2 Turbo template: distilled for 8 steps at CFG 1, euler/simple.
+  krea2_turbo: {
+    arch: "krea2",
+    label: "Krea 2 Turbo",
+    loraBase: "krea2",
+    sizes: SDXL_SIZES,
+    steps: { fast: 6, balanced: 8, best: 10 },
+    cfg: 1,
+    sampler: "euler",
+    scheduler: "simple",
+    clipSkip: 1,
+    negative: false,
+    latent: "EmptyLatentImage",
+  },
 };
 
 /** Families the detector recognises but Fletch can't run yet, in words. */
-export const UNSUPPORTED: Record<string, string> = { sd2: "SD 2", sd3: "SD 3.5", flux2: "FLUX.2 dev" };
+export const UNSUPPORTED: Record<string, string> = {
+  sd2: "SD 2",
+  sd3: "SD 3.5",
+  flux2: "FLUX.2 dev",
+  krea2_raw: "Krea 2 RAW (made for training LoRAs; use Krea 2 Turbo to make images)",
+};
 
 export const FAMILIES = Object.keys(PROFILES) as Family[];
 

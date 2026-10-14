@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compile, modelProblems, pickParts, resolve, type ApiWorkflow, type Link, type Settings } from "./workflow";
+import { compile, modelProblems, nodeDefaults, pickParts, resolve, sizeFor, type ApiWorkflow, type Link, type Settings } from "./workflow";
 
 const base: Settings = {
   model: { folder: "checkpoints", name: "juggernautXL.safetensors" },
@@ -22,6 +22,7 @@ const OUTPUTS: Record<string, number> = {
   DualCLIPLoader: 1,
   VAELoader: 1,
   LoraLoader: 2,
+  LoraLoaderModelOnly: 1,
   CLIPSetLastLayer: 1,
   CLIPTextEncode: 1,
   FluxGuidance: 1,
@@ -35,9 +36,25 @@ const OUTPUTS: Record<string, number> = {
   Flux2Scheduler: 1,
   CFGGuider: 1,
   SamplerCustomAdvanced: 2,
+  LoadImage: 2,
+  ImageScale: 1,
+  ImageScaleBy: 1,
+  VAEEncode: 1,
+  GrowMask: 1,
+  SetLatentNoiseMask: 1,
+  SplitSigmasDenoise: 2,
+  ControlNetLoader: 1,
+  ControlNetApplyAdvanced: 2,
+  Canny: 1,
+  DWPreprocessor: 1,
+  UpscaleModelLoader: 1,
+  ImageUpscaleWithModel: 1,
+  UltralyticsDetectorProvider: 2,
+  FaceDetailer: 4,
   KSampler: 1,
   VAEDecode: 1,
   SaveImage: 0,
+  FletchSaveImage: 0,
 };
 
 const isLink = (v: unknown): v is Link =>
@@ -52,7 +69,7 @@ function expectWellFormed(wf: ApiWorkflow) {
       expect(v[1]).toBeLessThan(OUTPUTS[wf[v[0]].class_type]);
     }
   }
-  expect(Object.values(wf).filter((n) => n.class_type === "SaveImage")).toHaveLength(1);
+  expect(Object.values(wf).filter((n) => n.class_type === "SaveImage" || n.class_type === "FletchSaveImage")).toHaveLength(1);
 }
 
 const byType = (wf: ApiWorkflow, type: string) => Object.entries(wf).filter(([, n]) => n.class_type === type);
@@ -202,6 +219,66 @@ describe("compile", () => {
   });
 });
 
+describe("Krea 2", () => {
+  const krea = {
+    ...base,
+    model: { folder: "diffusion_models" as const, name: "krea2_turbo_fp8_scaled.safetensors" },
+    family: "krea2_turbo" as const,
+  };
+  const kreaParts = { qwen: "qwen3vl_4b_fp8_scaled.safetensors", vae: "qwen_image_vae.safetensors" };
+
+  it("builds Krea 2 Turbo the way ComfyUI's own template does", () => {
+    const wf = compile({ ...krea, loras: [{ name: "krea2_darkbrush.safetensors", weight: 0.8 }] }, kreaParts);
+    expectWellFormed(wf);
+    expect(one(wf, "CLIPLoader")[1].inputs).toEqual({ clip_name: "qwen3vl_4b_fp8_scaled.safetensors", type: "krea2", device: "default" });
+    expect(one(wf, "VAELoader")[1].inputs).toEqual({ vae_name: "qwen_image_vae.safetensors" });
+    expect(byType(wf, "LoraLoader")).toHaveLength(0);
+    const [loraId, lora] = one(wf, "LoraLoaderModelOnly");
+    expect(lora.inputs).toMatchObject({ lora_name: "krea2_darkbrush.safetensors", strength_model: 0.8 });
+    const ks = one(wf, "KSampler")[1].inputs;
+    expect(ks).toMatchObject({ steps: 8, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 });
+    expect(ks.model).toEqual([loraId, 0]);
+    expect(follow(wf, ks.negative).class_type).toBe("ConditioningZeroOut");
+    expect(follow(wf, ks.latent_image).class_type).toBe("EmptyLatentImage");
+  });
+
+  it("uses a typed negative prompt only when CFG is raised above 1", () => {
+    const neg = (cfg?: number) => {
+      const wf = compile({ ...krea, negative: "blurry", advanced: { cfg } }, kreaParts);
+      return follow(wf, one(wf, "KSampler")[1].inputs.negative);
+    };
+    expect(neg().class_type).toBe("ConditioningZeroOut");
+    expect(neg(3).inputs.text).toBe("blurry");
+  });
+
+  it("says which Krea 2 files to add", () => {
+    expect(modelProblems(krea, {})).toEqual([
+      "Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.",
+      "Add the Qwen Image VAE (qwen_image_vae.safetensors) to models/vae.",
+    ]);
+  });
+
+  it("finds the Qwen3-VL encoder and Qwen Image VAE, and keeps Klein off the VL encoder", () => {
+    const encoders = ["qwen3vl_4b_fp8_scaled.safetensors", "qwen_3_4b.safetensors"];
+    const vaes = ["flux2-vae.safetensors", "qwen_image_vae.safetensors"];
+    expect(pickParts("krea2_turbo", null, encoders, vaes)).toEqual(kreaParts);
+    expect(pickParts("flux2_klein", null, encoders, vaes).qwen).toBe("qwen_3_4b.safetensors");
+  });
+});
+
+describe("save destination", () => {
+  it("saves into ComfyUI's output by default, into a subfolder, or anywhere with Fletch's node", () => {
+    expect(one(compile(base), "SaveImage")[1].inputs.filename_prefix).toBe("fletch");
+    expect(one(compile(base, {}, undefined, {}, { subfolder: "portraits/2026" }), "SaveImage")[1].inputs.filename_prefix).toBe(
+      "portraits/2026/fletch",
+    );
+    const wf = compile(base, {}, undefined, {}, { folder: "D:\\Art\\Fletch" });
+    expectWellFormed(wf);
+    expect(byType(wf, "SaveImage")).toHaveLength(0);
+    expect(one(wf, "FletchSaveImage")[1].inputs).toMatchObject({ folder: "D:\\Art\\Fletch", filename_prefix: "fletch" });
+  });
+});
+
 describe("resolve", () => {
   it("reports what the run will use", () => {
     expect(resolve({ family: "sdxl", shape: "wide", quality: "best", advanced: {} })).toEqual({
@@ -241,5 +318,124 @@ describe("pickParts", () => {
       "Add the Flux 2 VAE (flux2-vae.safetensors) to models/vae.",
     ]);
     expect(modelProblems({ ...s, family: "sdxl" }, {})[0]).toMatch(/full checkpoint/);
+  });
+});
+
+const photo = { name: "fletch/beach.png", width: 1200, height: 800 };
+
+describe("add-ons", () => {
+  it("starts from an image: scaled to the family's size at the image's aspect, encoded, partly denoised", () => {
+    const wf = compile({ ...base, addons: { source: { image: photo, strength: 0.6 } } });
+    expectWellFormed(wf);
+    expect(byType(wf, "EmptyLatentImage")).toHaveLength(0);
+    expect(one(wf, "LoadImage")[1].inputs).toEqual({ image: "fletch/beach.png" });
+    expect(one(wf, "ImageScale")[1].inputs).toMatchObject({ width: 1280, height: 832, crop: "disabled" });
+    expect(follow(wf, sampler(wf).latent_image).class_type).toBe("VAEEncode");
+    expect(sampler(wf).denoise).toBe(0.6);
+  });
+
+  it("inpaints only the painted area", () => {
+    const masked = { ...photo, name: "fletch/beach-mask.png" };
+    const wf = compile({ ...base, addons: { source: { image: photo, masked, strength: 0.9 } } });
+    expectWellFormed(wf);
+    const [loadId, load] = one(wf, "LoadImage");
+    expect(load.inputs.image).toBe("fletch/beach-mask.png");
+    expect(one(wf, "GrowMask")[1].inputs.mask).toEqual([loadId, 1]);
+    expect(follow(wf, sampler(wf).latent_image).class_type).toBe("SetLatentNoiseMask");
+  });
+
+  it("does img2img on Klein by trimming the FLUX.2 schedule", () => {
+    const s = {
+      ...base,
+      model: { folder: "diffusion_models" as const, name: "klein.safetensors" },
+      family: "flux2_klein" as const,
+      variant: "4b",
+      addons: { source: { image: photo, strength: 0.5 } },
+    };
+    const wf = compile(s, { qwen: "qwen_3_4b.safetensors", vae: "flux2-vae.safetensors" });
+    expectWellFormed(wf);
+    const sca = one(wf, "SamplerCustomAdvanced")[1].inputs;
+    expect(sca.sigmas).toEqual([one(wf, "SplitSigmasDenoise")[0], 1]);
+    expect(one(wf, "SplitSigmasDenoise")[1].inputs.denoise).toBe(0.5);
+    expect(follow(wf, sca.latent_image).class_type).toBe("VAEEncode");
+  });
+
+  it("hires fix enlarges, re-encodes and refines with a second pass", () => {
+    const wf = compile({ ...base, addons: { hires: { scale: 1.5, strength: 0.45 } } });
+    expectWellFormed(wf);
+    const passes = byType(wf, "KSampler");
+    expect(passes).toHaveLength(2);
+    expect(passes[0][1].inputs.denoise).toBe(1);
+    expect(passes[1][1].inputs.denoise).toBe(0.45);
+    expect(follow(wf, passes[1][1].inputs.latent_image).class_type).toBe("VAEEncode");
+    expect(one(wf, "ImageScaleBy")[1].inputs.scale_by).toBe(1.5);
+    const saved = one(wf, "SaveImage")[1].inputs.images as Link;
+    expect(follow(wf, follow(wf, saved).inputs.samples)).toBe(passes[1][1]);
+  });
+
+  it("upscales last, after face fix", () => {
+    const nodes = {
+      FaceDetailer: { input: { required: { image: ["IMAGE"], guide_size: ["FLOAT", { default: 512 }], wildcard: ["STRING", { multiline: true }], sam_detection_hint: [["center-1", "none"]], denoise: ["FLOAT", { default: 0.5 }] } } },
+      UltralyticsDetectorProvider: { input: { required: { model_name: [["bbox/face_yolov8m.pt"]] } } },
+    };
+    const wf = compile(
+      { ...base, addons: { faceFix: { detector: "bbox/face_yolov8m.pt", strength: 0.4 }, upscale: { model: "4x-UltraSharp.pth" } } },
+      {},
+      undefined,
+      nodes,
+    );
+    expectWellFormed(wf);
+    const [faceId, face] = one(wf, "FaceDetailer");
+    expect(face.inputs).toMatchObject({ guide_size: 512, wildcard: "", sam_detection_hint: "center-1", denoise: 0.4, seed: 42 });
+    expect(follow(wf, face.inputs.bbox_detector).inputs.model_name).toBe("bbox/face_yolov8m.pt");
+    const up = one(wf, "ImageUpscaleWithModel")[1];
+    expect(up.inputs.image).toEqual([faceId, 0]);
+    expect(follow(wf, one(wf, "SaveImage")[1].inputs.images)).toBe(up);
+  });
+
+  it("applies a guide to both prompts, with the right preprocessor", () => {
+    const guide = { image: photo, mode: "canny" as const, model: "controlnet-canny-sdxl.safetensors", strength: 0.7 };
+    const wf = compile({ ...base, addons: { guide } });
+    expectWellFormed(wf);
+    const [cnId, cn] = one(wf, "ControlNetApplyAdvanced");
+    expect(follow(wf, cn.inputs.image).class_type).toBe("Canny");
+    expect(cn.inputs.strength).toBe(0.7);
+    expect(sampler(wf).positive).toEqual([cnId, 0]);
+    expect(sampler(wf).negative).toEqual([cnId, 1]);
+
+    const pose = compile({ ...base, addons: { guide: { ...guide, mode: "pose" } } }, {}, undefined, {
+      DWPreprocessor: { input: { required: { image: ["IMAGE"], detect_hand: [["enable", "disable"]], resolution: ["INT", { default: 512 }] } } },
+    });
+    expectWellFormed(pose);
+    expect(one(pose, "DWPreprocessor")[1].inputs).toMatchObject({ detect_hand: "enable", resolution: 512 });
+
+    const asis = compile({ ...base, addons: { guide: { ...guide, mode: "asis" } } });
+    expect(follow(asis, one(asis, "ControlNetApplyAdvanced")[1].inputs.image).class_type).toBe("LoadImage");
+  });
+});
+
+describe("sizeFor", () => {
+  it("keeps the source image's shape at the family's pixel count", () => {
+    expect(sizeFor("sdxl", "square", { width: 1200, height: 800 })).toEqual([1280, 832]);
+    expect(sizeFor("sd15", "square", { width: 800, height: 1200 })).toEqual([448, 640]);
+    expect(sizeFor("sdxl", "wide")).toEqual([1216, 832]);
+  });
+});
+
+describe("nodeDefaults", () => {
+  it("fills widgets from defaults and skips links", () => {
+    expect(
+      nodeDefaults({
+        input: {
+          required: {
+            image: ["IMAGE"],
+            n: ["INT", { default: 3 }],
+            mode: ["COMBO", { options: ["a", "b"], default: "b" }],
+            old: [["x", "y"]],
+            flag: ["BOOLEAN", { default: true }],
+          },
+        },
+      }),
+    ).toEqual({ n: 3, mode: "b", old: "x", flag: true });
   });
 });

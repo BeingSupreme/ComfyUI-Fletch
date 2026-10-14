@@ -117,3 +117,4 @@ select { max-width: 100%; text-overflow: ellipsis; }
 .output-edit .row { flex-wrap: nowrap; justify-content: flex-start; }
 .output-edit input { flex: 1; min-width: 0; }
 .output-edit code { word-break: break-all; }
+.bar-buttons { display: flex; flex-wrap: wrap; gap: 12px; }

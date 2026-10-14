@@ -531,8 +531,11 @@ export function App() {
           onChange={(e) => update({ positive: e.target.value })}
           onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && canGenerate && generate()}
         />
-        {(!profile || profile.negative) && (
-          <input placeholder="Avoid" value={choices.negative} onChange={(e) => update({ negative: e.target.value })} />
+        <input placeholder="Avoid" value={choices.negative} onChange={(e) => update({ negative: e.target.value })} />
+        {profile && !profile.negative && numbers && numbers.cfg <= 1 && choices.negative.trim() && (
+          <p className="muted small note">
+            {profile.label} ignores this at CFG 1. Set CFG above 1 in Advanced to use it (each step takes about twice as long).
+          </p>
         )}
         <div className="generate">
           <button className="primary" disabled={!canGenerate} onClick={generate}>

@@ -302,7 +302,8 @@ export function compile(
   let POSITIVE: Link = [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.positivePrefix, s.positive) }), 0];
   if (p.guidance !== undefined) POSITIVE = [g.add("FluxGuidance", { conditioning: POSITIVE, guidance: p.guidance }), 0];
   let NEGATIVE: Link;
-  if (p.negative) NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.negativePrefix, s.negative) }), 0];
+  // Distilled models skip the negative at CFG 1; above that, a typed negative is used.
+  if (p.negative || (r.cfg > 1 && s.negative.trim())) NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.negativePrefix, s.negative) }), 0];
   else if (p.arch === "flux2" || p.arch === "krea2") NEGATIVE = [g.add("ConditioningZeroOut", { conditioning: POSITIVE }), 0];
   else NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: "" }), 0];
 

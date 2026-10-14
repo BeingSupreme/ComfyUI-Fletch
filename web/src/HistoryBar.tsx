@@ -45,12 +45,11 @@ export function HistoryBar(props: {
 
   return (
     <div className="history-bar">
-      <div className="row">
-        <span className="label">History{props.count > 0 && ` (${props.count})`}</span>
-        <span className="actions">
+      <span className="label">History{props.count > 0 && ` (${props.count})`}</span>
+      <div className="bar-buttons">
           {output && (
             <button
-              className="link"
+              className="primary"
               title={output.path}
               onClick={() => {
                 setDraft(output.folder);
@@ -61,18 +60,17 @@ export function HistoryBar(props: {
             </button>
           )}
           {output && (
-            <button className="link" onClick={() => openOutputFolder().catch((e) => props.onError((e as Error).message))}>
+            <button className="primary" onClick={() => openOutputFolder().catch((e) => props.onError((e as Error).message))}>
               Open folder
             </button>
           )}
           <button
-            className="link"
+            className="primary"
             disabled={props.count === 0}
             onClick={() => window.confirm("Clear the history? Your saved images stay in their folder.") && props.onClear()}
           >
-            Clear history
-          </button>
-        </span>
+          Clear history
+        </button>
       </div>
       {editing && output && (
         <div className="output-edit">

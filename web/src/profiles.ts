@@ -32,7 +32,7 @@ export interface Profile {
   scheduler: string;
   /** 1 = use every CLIP layer; 2 = skip the last one (CLIPSetLastLayer -2). */
   clipSkip: number;
-  /** False hides the "Avoid" box (Flux ignores negative prompts at CFG 1). */
+  /** False for distilled models, which ignore the negative prompt unless CFG is raised above 1. */
   negative: boolean;
   /** Flux distilled guidance, applied with FluxGuidance. */
   guidance?: number;

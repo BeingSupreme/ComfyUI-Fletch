@@ -242,6 +242,15 @@ describe("Krea 2", () => {
     expect(follow(wf, ks.latent_image).class_type).toBe("EmptyLatentImage");
   });
 
+  it("uses a typed negative prompt only when CFG is raised above 1", () => {
+    const neg = (cfg?: number) => {
+      const wf = compile({ ...krea, negative: "blurry", advanced: { cfg } }, kreaParts);
+      return follow(wf, one(wf, "KSampler")[1].inputs.negative);
+    };
+    expect(neg().class_type).toBe("ConditioningZeroOut");
+    expect(neg(3).inputs.text).toBe("blurry");
+  });
+
   it("says which Krea 2 files to add", () => {
     expect(modelProblems(krea, {})).toEqual([
       "Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.",

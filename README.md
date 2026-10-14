@@ -41,7 +41,8 @@ Pick a Wan 2.2 model and Fletch switches to video: a **Length** choice (2, 3 or 
   - `ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors` in `models/loras` ([Comfy-Org/ltx-2.3](https://huggingface.co/Comfy-Org/ltx-2.3/resolve/main/split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors))
   - `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` in `models/latent_upscale_models` ([Lightricks/LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors))
 
-  It runs the template's fixed schedule (8 steps at half size, then 3 more after a 2x upscale), so the Quality choice is hidden. A start picture from **Start from an image** becomes the first frame.
+  It runs the template's fixed schedule (8 steps at half size, then 3 more after a 2x upscale), so the Quality choice is hidden. A start picture from **Start from an image** becomes the first frame. LTX offers up to 20 seconds; longer clips need more memory and time.
+- **Continue from last frame** (under a finished video) makes its final frame the start picture for the next run, so you can chain clips. Each clip saves as its own file.
 - Wan LoRAs work. One whose name says high noise or low noise goes on that half only; others go on both.
 - The image add-ons (hires fix, face fix, guide, upscale) are off for video for now.
 

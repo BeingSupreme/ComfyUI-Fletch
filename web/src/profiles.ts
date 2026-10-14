@@ -61,7 +61,7 @@ export interface Profile {
 
 export interface VideoProfile {
   fps: number;
-  /** Lengths offered, in seconds; the last is the longest the model handles well. */
+  /** Lengths offered, in seconds (5 is the default when offered). */
   seconds: number[];
   /** ModelSamplingSD3 shift. */
   shift: number;
@@ -271,7 +271,7 @@ export const PROFILES: Record<Family, Profile> = {
     negativePrefix: "pc game, console game, video game, cartoon, childish, ugly",
     latent: "EmptyLTXVLatentVideo",
     fixedSchedule: true,
-    video: { fps: 25, seconds: [2, 3, 5], shift: 0, experts: false, image: "optional", audio: true },
+    video: { fps: 25, seconds: [2, 5, 10, 15, 20], shift: 0, experts: false, image: "optional", audio: true },
   },
 };
 

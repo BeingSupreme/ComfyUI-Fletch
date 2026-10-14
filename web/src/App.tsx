@@ -40,6 +40,26 @@ import {
 const destination = (o: OutputFolder | null): Destination =>
   !o ? {} : o.inside_output ? { subfolder: o.subfolder || undefined } : { folder: o.path };
 
+/** The final frame of a video, as a PNG. */
+function lastFrame(url: string): Promise<Blob> {
+  return new Promise((done, fail) => {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.preload = "auto";
+    v.onerror = () => fail(new Error("Couldn't read the video's last frame."));
+    v.onloadedmetadata = () => {
+      v.currentTime = Math.max(0, v.duration - 0.01);
+    };
+    v.onseeked = () => {
+      const c = document.createElement("canvas");
+      [c.width, c.height] = [v.videoWidth, v.videoHeight];
+      c.getContext("2d")!.drawImage(v, 0, 0);
+      c.toBlob((b) => (b ? done(b) : fail(new Error("Couldn't read the video's last frame."))), "image/png");
+    };
+    v.src = url;
+  });
+}
+
 const isVideo = (nameOrUrl: string) => /\.(mp4|webm|mkv|mov)(&|$)/i.test(nameOrUrl);
 
 type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
@@ -308,6 +328,17 @@ export function App() {
     try {
       const blob = await (await fetch(imageUrl(entry.image))).blob();
       setAddon("source", { on: true, image: await uploadImage(blob, entry.image.filename), masked: undefined });
+    } catch (e) {
+      setStatus({ kind: "error", message: String((e as Error).message ?? e) });
+    }
+  }
+
+  /** Chain clips: the last frame of a finished video becomes the start picture for the next. */
+  async function continueFrom(entry: HistoryEntry) {
+    try {
+      const blob = await lastFrame(imageUrl(entry.image));
+      const name = entry.image.filename.replace(/\.[^.]+$/, "") + "-last.png";
+      setAddon("source", { on: true, image: await uploadImage(blob, name), masked: undefined });
     } catch (e) {
       setStatus({ kind: "error", message: String((e as Error).message ?? e) });
     }
@@ -608,7 +639,9 @@ export function App() {
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
             <span className="actions">
-              {!isVideo(selected.image.filename) && (
+              {isVideo(selected.image.filename) ? (
+                <button className="link" onClick={() => continueFrom(selected)}>Continue from last frame</button>
+              ) : (
                 <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
               )}
               <button className="link" onClick={() => reuse(selected)}>Use these settings</button>

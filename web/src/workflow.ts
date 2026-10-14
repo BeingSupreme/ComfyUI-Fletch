@@ -174,7 +174,7 @@ export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "adva
   const [width, height] = sizeFor(s.family, s.shape, s.addons?.source?.image);
   const speed = !!s.speedLora;
   const v = p.video;
-  const seconds = v ? (s.seconds && v.seconds.includes(s.seconds) ? s.seconds : v.seconds[v.seconds.length - 1]) : 0;
+  const seconds = v ? (s.seconds && v.seconds.includes(s.seconds) ? s.seconds : v.seconds.includes(5) ? 5 : v.seconds[v.seconds.length - 1]) : 0;
   return {
     width,
     height,

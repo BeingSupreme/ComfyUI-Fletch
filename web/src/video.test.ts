@@ -171,6 +171,11 @@ describe("LTX-2.3", () => {
     expect(one(wf, "ImageScale")[1].inputs).toMatchObject({ width: 960, height: 960 });
   });
 
+  it("goes up to 20 seconds", () => {
+    expect(resolve({ ...ltx, seconds: 10 }).frames).toBe(251);
+    expect(resolve({ ...ltx, seconds: 20 }).frames).toBe(501);
+  });
+
   it("finds its files and says which are missing", () => {
     const parts = pickParts("ltx23", null, ["gemma_3_12B_it_fp4_mixed.safetensors", "t5xxl.safetensors"], [], CKPT, [], {
       loras: ["detail.safetensors", ltxParts.distillLora],

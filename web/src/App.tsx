@@ -58,6 +58,8 @@ interface Choices {
   lorasOn: boolean;
   loras: LoraChoice[];
   advanced: Advanced;
+  /** The family the Advanced numbers were set for; they don't carry over to another family. */
+  advancedFor?: Family | null;
   /** Fixed seed, or null for a new random seed every run. */
   seed: number | null;
   addons: AddonChoices;
@@ -150,7 +152,6 @@ export function App() {
   }, []);
 
   const update = (patch: Partial<Choices>) => setChoices((c) => ({ ...c, ...patch }));
-  const setAdvanced = (patch: Partial<Advanced>) => setChoices((c) => ({ ...c, advanced: { ...c.advanced, ...patch } }));
   const setAddon = <K extends AddonKey>(key: K, patch: Partial<AddonChoices[K]>) =>
     setChoices((c) => ({ ...c, addons: { ...c.addons, [key]: { ...c.addons[key], ...patch } } }));
 
@@ -190,6 +191,10 @@ export function App() {
 
   const detectedFamily = detected?.key === key && isFamily(detected.family) ? detected.family : null;
   const family: Family | null = overrides[key] ?? detectedFamily;
+  // Steps or CFG typed for SDXL would be wrong for Krea or Flux, so overrides stay with their family.
+  const advanced: Advanced = family && choices.advancedFor === family ? choices.advanced : {};
+  const setAdvanced = (patch: Partial<Advanced>) =>
+    setChoices((c) => ({ ...c, advanced: { ...(c.advancedFor === family ? c.advanced : {}), ...patch }, advancedFor: family }));
   const profile = family ? PROFILES[family] : null;
   const current = detected?.key === key ? detected : null;
   const variant = current?.variant ?? null;
@@ -205,7 +210,7 @@ export function App() {
   const usableControlnets = new Set(profile ? controlnetsFor(profile, controlnets).map((c) => c.name) : []);
   const runAddons = addonsForRun(choices.addons, blocked, catalog, usableControlnets);
   const numbers = family
-    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced: choices.advanced, addons: runAddons })
+    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons })
     : null;
 
   function settingsForRun(): Settings | null {
@@ -221,7 +226,7 @@ export function App() {
       // Drop LoRAs left over from a model of another family.
       loras: choices.lorasOn ? choices.loras.filter((l) => usableLoras.has(l.name)) : [],
       seed: choices.seed ?? randomSeed(),
-      advanced: choices.advanced,
+      advanced,
       addons: runAddons,
     };
   }
@@ -268,6 +273,7 @@ export function App() {
       lorasOn: s.loras.length > 0,
       loras: s.loras.length ? s.loras : c.loras,
       advanced: s.advanced,
+      advancedFor: s.family,
       seed: s.seed,
       addons: {
         source: { ...c.addons.source, on: !!s.addons?.source, ...s.addons?.source },
@@ -398,7 +404,7 @@ export function App() {
 
         <section>
           <span className="label">Quality</span>
-          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...choices.advanced, steps: undefined } })} />
+          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
         </section>
 
         <section>
@@ -467,19 +473,19 @@ export function App() {
               <span className="label">Steps</span>
               <input
                 inputMode="numeric" placeholder={numbers ? String(profile!.steps[choices.quality]) : ""}
-                value={choices.advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
+                value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
               />
             </label>
             <label>
               <span className="label">CFG</span>
               <input
                 inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
-                value={choices.advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
+                value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
               />
             </label>
             <label>
               <span className="label">Sampler</span>
-              <select value={choices.advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
+              <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
                 <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
                 {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
               </select>
@@ -487,7 +493,7 @@ export function App() {
             <label>
               <span className="label">Scheduler</span>
               <select
-                value={choices.advanced.scheduler ?? ""}
+                value={advanced.scheduler ?? ""}
                 disabled={profile?.arch === "flux2"}
                 onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
               >
@@ -498,7 +504,7 @@ export function App() {
             <label>
               <span className="label">Clip skip</span>
               <select
-                value={choices.advanced.clipSkip ?? ""}
+                value={advanced.clipSkip ?? ""}
                 onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
               >
                 <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>

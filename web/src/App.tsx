@@ -1,43 +1,184 @@
-import { useEffect, useState } from "react";
-import { connect, imageUrl, listCheckpoints, queuePrompt, watch, type ImageRef } from "./comfy";
-import { buildTxt2Img, randomSeed, SDXL_DEFAULTS } from "./workflow";
+import { useEffect, useMemo, useState } from "react";
+import {
+  connect,
+  imageUrl,
+  listLoras,
+  loadCatalog,
+  modelInfo,
+  queuePrompt,
+  watch,
+  type Catalog,
+  type ImageRef,
+  type LoraInfo,
+} from "./comfy";
+import { FAMILIES, isFamily, PROFILES, type Family, type Quality, type Shape } from "./profiles";
+import { load, save } from "./store";
+import {
+  compile,
+  missingParts,
+  pickFluxParts,
+  randomSeed,
+  resolve,
+  type Advanced,
+  type LoraChoice,
+  type ModelFolder,
+  type Settings,
+} from "./workflow";
 
 type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
 
+interface HistoryEntry {
+  image: ImageRef;
+  settings: Settings;
+  /** True when the family was picked by hand rather than detected. */
+  familyOverridden?: boolean;
+}
+
+/** What the user has chosen; the family and seed are worked out when a run starts. */
+interface Choices {
+  model: { folder: ModelFolder; name: string } | null;
+  positive: string;
+  negative: string;
+  shape: Shape;
+  quality: Quality;
+  lorasOn: boolean;
+  loras: LoraChoice[];
+  advanced: Advanced;
+  /** Fixed seed, or null for a new random seed every run. */
+  seed: number | null;
+}
+
+const DEFAULT_CHOICES: Choices = {
+  model: null,
+  positive: "",
+  negative: "blurry, low quality",
+  shape: "square",
+  quality: "balanced",
+  lorasOn: false,
+  loras: [{ name: "", weight: 0.8 }],
+  advanced: {},
+  seed: null,
+};
+
+const EMPTY_CATALOG: Catalog = { checkpoints: [], diffusionModels: [], textEncoders: [], vaes: [], samplers: [], schedulers: [] };
+
+const modelKey = (m: { folder: string; name: string }) => `${m.folder}:${m.name}`;
+
+const SHAPES: [Shape, string][] = [["square", "Square"], ["portrait", "Portrait"], ["wide", "Wide"]];
+const QUALITIES: [Quality, string][] = [["fast", "Fast"], ["balanced", "Balanced"], ["best", "Best"]];
+
+function Chips<T extends string>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
+  return (
+    <div className="chips">
+      {props.options.map(([v, label]) => (
+        <button key={v} className={v === props.value ? "chip on" : "chip"} onClick={() => props.onChange(v)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Toggle(props: { label: string; on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="toggle">
+      <span>{props.label}</span>
+      <input type="checkbox" role="switch" checked={props.on} onChange={(e) => props.onChange(e.target.checked)} />
+    </label>
+  );
+}
+
+const numberOrUndefined = (v: string) => (v.trim() === "" || Number.isNaN(Number(v)) ? undefined : Number(v));
+
 export function App() {
   const [connected, setConnected] = useState(false);
-  const [checkpoints, setCheckpoints] = useState<string[]>([]);
-  const [checkpoint, setCheckpoint] = useState("");
-  const [positive, setPositive] = useState("");
-  const [negative, setNegative] = useState("blurry, low quality");
+  const [catalog, setCatalog] = useState<Catalog>(EMPTY_CATALOG);
+  const [loras, setLoras] = useState<LoraInfo[]>([]);
+  const [choices, setChoices] = useState<Choices>(() => ({ ...DEFAULT_CHOICES, ...load("choices", {}) }));
+  const [detected, setDetected] = useState<{ key: string; family: string | null; reason?: string } | null>(null);
+  const [overrides, setOverrides] = useState<Record<string, Family>>(() => load("familyOverrides", {}));
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [preview, setPreview] = useState<string | null>(null);
-  const [history, setHistory] = useState<ImageRef[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => load("history", []));
+  const [selected, setSelected] = useState<HistoryEntry | null>(null);
 
+  const update = (patch: Partial<Choices>) => setChoices((c) => ({ ...c, ...patch }));
+  const setAdvanced = (patch: Partial<Advanced>) => setChoices((c) => ({ ...c, advanced: { ...c.advanced, ...patch } }));
+
+  useEffect(() => save("choices", choices), [choices]);
+  useEffect(() => save("history", history), [history]);
+  useEffect(() => save("familyOverrides", overrides), [overrides]);
   useEffect(() => connect(setConnected), []);
 
   useEffect(() => {
     if (!connected) return;
-    listCheckpoints()
-      .then((list) => {
-        setCheckpoints(list);
-        setCheckpoint((c) => c || list[0] || "");
-      })
-      .catch((e) => setStatus({ kind: "error", message: String(e.message ?? e) }));
+    loadCatalog().then((c) => {
+      setCatalog(c);
+      setChoices((ch) => {
+        const all = [
+          ...c.checkpoints.map((name) => ({ folder: "checkpoints" as const, name })),
+          ...c.diffusionModels.map((name) => ({ folder: "diffusion_models" as const, name })),
+        ];
+        const stillThere = ch.model && all.some((m) => modelKey(m) === modelKey(ch.model!));
+        return stillThere ? ch : { ...ch, model: all[0] ?? null };
+      });
+    });
+    listLoras().then(setLoras, () => setLoras([]));
   }, [connected]);
 
+  // Detect the family of the chosen model.
+  const key = choices.model ? modelKey(choices.model) : "";
+  useEffect(() => {
+    if (!choices.model || !connected) return;
+    const k = modelKey(choices.model);
+    modelInfo(choices.model.folder, choices.model.name).then(
+      (info) => setDetected({ key: k, family: info.family, reason: info.reason }),
+      (e) => setDetected({ key: k, family: null, reason: String(e.message ?? e) }),
+    );
+  }, [key, connected]);
+
+  const detectedFamily = detected?.key === key && isFamily(detected.family) ? detected.family : null;
+  const family: Family | null = overrides[key] ?? detectedFamily;
+  const profile = family ? PROFILES[family] : null;
+  const parts = useMemo(() => pickFluxParts(catalog.textEncoders, catalog.vaes), [catalog]);
+  const missing = choices.model && family ? missingParts({ model: choices.model, family }, parts) : [];
+  const numbers = family ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced: choices.advanced }) : null;
+  const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
+  const unknownLoras = loras.filter((l) => l.family === null);
+  const usableLoras = new Set([...compatibleLoras, ...unknownLoras].map((l) => l.name));
+
+  function settingsForRun(): Settings | null {
+    if (!choices.model || !family) return null;
+    return {
+      model: choices.model,
+      family,
+      positive: choices.positive,
+      negative: choices.negative,
+      shape: choices.shape,
+      quality: choices.quality,
+      // Drop LoRAs left over from a model of another family.
+      loras: choices.lorasOn ? choices.loras.filter((l) => usableLoras.has(l.name)) : [],
+      seed: choices.seed ?? randomSeed(),
+      advanced: choices.advanced,
+    };
+  }
+
   async function generate() {
-    setStatus({ kind: "running", step: 0, of: SDXL_DEFAULTS.steps });
+    const settings = settingsForRun();
+    if (!settings || !numbers) return;
+    setStatus({ kind: "running", step: 0, of: numbers.steps });
     setPreview(null);
+    setSelected(null);
     try {
-      const workflow = buildTxt2Img({ ...SDXL_DEFAULTS, checkpoint, positive, negative, seed: randomSeed() });
-      const id = await queuePrompt(workflow);
+      const id = await queuePrompt(compile(settings, parts), { fletch: settings });
       const stop = watch(id, (e) => {
         if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
         else if (e.kind === "preview") setPreview(e.url);
         else if (e.kind === "image") {
+          const entry = { image: e.image, settings, familyOverridden: !!overrides[modelKey(settings.model)] };
           setPreview(imageUrl(e.image));
-          setHistory((h) => [e.image, ...h].slice(0, 20));
+          setSelected(entry);
+          setHistory((h) => [entry, ...h].slice(0, 40));
         } else if (e.kind === "error") {
           setStatus({ kind: "error", message: e.message });
           stop();
@@ -51,8 +192,29 @@ export function App() {
     }
   }
 
+  function reuse(entry: HistoryEntry) {
+    const s = entry.settings;
+    if (entry.familyOverridden) setOverrides((o) => ({ ...o, [modelKey(s.model)]: s.family }));
+    setChoices((c) => ({
+      ...c,
+      model: s.model,
+      positive: s.positive,
+      negative: s.negative,
+      shape: s.shape,
+      quality: s.quality,
+      lorasOn: s.loras.length > 0,
+      loras: s.loras.length ? s.loras : c.loras,
+      advanced: s.advanced,
+      seed: s.seed,
+    }));
+  }
+
+  const setLora = (i: number, patch: Partial<LoraChoice>) =>
+    update({ loras: choices.loras.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
+
   const running = status.kind === "running";
-  const canGenerate = connected && !!checkpoint && positive.trim() !== "" && !running;
+  const canGenerate = connected && !!family && missing.length === 0 && choices.positive.trim() !== "" && !running;
+  const familyName = (f: Family) => PROFILES[f].label;
 
   return (
     <div className="app">
@@ -63,31 +225,196 @@ export function App() {
       </header>
 
       <aside>
-        <label>
+        <section>
           <span className="label">Model</span>
-          <select value={checkpoint} onChange={(e) => setCheckpoint(e.target.value)}>
-            {checkpoints.length === 0 && <option value="">No checkpoints found</option>}
-            {checkpoints.map((c) => (
-              <option key={c}>{c}</option>
-            ))}
+          <select
+            value={key}
+            onChange={(e) => {
+              const [folder, ...rest] = e.target.value.split(":");
+              update({ model: { folder: folder as ModelFolder, name: rest.join(":") } });
+            }}
+          >
+            {!choices.model && <option value="">No models found</option>}
+            {catalog.checkpoints.length > 0 && (
+              <optgroup label="Checkpoints">
+                {catalog.checkpoints.map((n) => (
+                  <option key={n} value={`checkpoints:${n}`}>{n}</option>
+                ))}
+              </optgroup>
+            )}
+            {catalog.diffusionModels.length > 0 && (
+              <optgroup label="Diffusion models">
+                {catalog.diffusionModels.map((n) => (
+                  <option key={n} value={`diffusion_models:${n}`}>{n}</option>
+                ))}
+              </optgroup>
+            )}
           </select>
-        </label>
-        <p className="muted small">
-          SDXL defaults: {SDXL_DEFAULTS.width} x {SDXL_DEFAULTS.height}, {SDXL_DEFAULTS.steps} steps, CFG {SDXL_DEFAULTS.cfg}
-        </p>
+          {choices.model && (
+            <div className="family">
+              <select
+                className={family ? "badge" : "badge warn"}
+                aria-label="Model family"
+                value={overrides[key] ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setOverrides((o) => {
+                    const next = { ...o };
+                    if (isFamily(v)) next[key] = v;
+                    else delete next[key];
+                    return next;
+                  });
+                }}
+              >
+                <option value="">
+                  {detectedFamily ? `${familyName(detectedFamily)} (detected)` : detected?.key === key ? "Pick a family" : "Detecting…"}
+                </option>
+                {FAMILIES.map((f) => (
+                  <option key={f} value={f}>{familyName(f)}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {numbers && profile && (
+            <p className="muted small">
+              Auto: {numbers.width} x {numbers.height}, {numbers.steps} steps, CFG {numbers.cfg}
+              {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
+              {profile.positivePrefix && ", adds quality tags"}
+            </p>
+          )}
+          {detected?.key === key && !detectedFamily && !overrides[key] && (
+            <p className="warn-text small">
+              {detected.family ? `This looks like a ${detected.family.toUpperCase()} model, which Fletch doesn't support yet.` : "Couldn't tell what kind of model this is."} Pick its family above to use it anyway.
+            </p>
+          )}
+          {missing.length > 0 && <p className="warn-text small">This model also needs {missing.join(", ")}.</p>}
+        </section>
+
+        <section>
+          <span className="label">Shape</span>
+          <Chips options={SHAPES} value={choices.shape} onChange={(shape) => update({ shape })} />
+        </section>
+
+        <section>
+          <span className="label">Quality</span>
+          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...choices.advanced, steps: undefined } })} />
+        </section>
+
+        <section>
+          <span className="label">Add-ons</span>
+          <Toggle label="LoRA" on={choices.lorasOn} onChange={(lorasOn) => update({ lorasOn })} />
+          {choices.lorasOn && (
+            <div className="sub">
+              {compatibleLoras.length + unknownLoras.length === 0 && (
+                <p className="muted small">No {profile ? familyName(family!) : ""} LoRAs found in models/loras.</p>
+              )}
+              {choices.loras.map((l, i) => (
+                <div key={i} className="lora">
+                  <select value={l.name} onChange={(e) => setLora(i, { name: e.target.value })}>
+                    <option value="">Choose a LoRA</option>
+                    {compatibleLoras.length > 0 && (
+                      <optgroup label={`For ${profile!.loraBase === "sdxl" ? "SDXL, Pony and Illustrious" : familyName(family!)}`}>
+                        {compatibleLoras.map((x) => (
+                          <option key={x.name}>{x.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {unknownLoras.length > 0 && (
+                      <optgroup label="Base model unknown">
+                        {unknownLoras.map((x) => (
+                          <option key={x.name}>{x.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  <div className="row">
+                    <input
+                      type="range" min={0} max={1.5} step={0.05} value={l.weight} aria-label="LoRA weight"
+                      onChange={(e) => setLora(i, { weight: Number(e.target.value) })}
+                    />
+                    <span className="small weight">{l.weight.toFixed(2)}</span>
+                    {choices.loras.length > 1 && (
+                      <button className="link" onClick={() => update({ loras: choices.loras.filter((_, j) => j !== i) })}>
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <button className="link" onClick={() => update({ loras: [...choices.loras, { name: "", weight: 0.8 }] })}>
+                Add another LoRA
+              </button>
+            </div>
+          )}
+        </section>
+
+        <details>
+          <summary>Advanced</summary>
+          <div className="advanced">
+            <label>
+              <span className="label">Steps</span>
+              <input
+                inputMode="numeric" placeholder={numbers ? String(profile!.steps[choices.quality]) : ""}
+                value={choices.advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
+              />
+            </label>
+            <label>
+              <span className="label">CFG</span>
+              <input
+                inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
+                value={choices.advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
+              />
+            </label>
+            <label>
+              <span className="label">Sampler</span>
+              <select value={choices.advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
+                <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
+                {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className="label">Scheduler</span>
+              <select value={choices.advanced.scheduler ?? ""} onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}>
+                <option value="">Auto{profile ? ` (${profile.scheduler})` : ""}</option>
+                {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className="label">Clip skip</span>
+              <select
+                value={choices.advanced.clipSkip ?? ""}
+                onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
+              >
+                <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+              </select>
+            </label>
+            <label>
+              <span className="label">Seed</span>
+              <input
+                inputMode="numeric" placeholder="Random each time" value={choices.seed ?? ""}
+                onChange={(e) => update({ seed: numberOrUndefined(e.target.value) ?? null })}
+              />
+            </label>
+            <button className="link" onClick={() => update({ advanced: {}, seed: null })}>Reset to auto</button>
+          </div>
+        </details>
       </aside>
 
       <main>
         <textarea
           placeholder="Describe the image you want"
-          value={positive}
-          onChange={(e) => setPositive(e.target.value)}
+          value={choices.positive}
+          onChange={(e) => update({ positive: e.target.value })}
           onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && canGenerate && generate()}
         />
-        <input placeholder="Avoid" value={negative} onChange={(e) => setNegative(e.target.value)} />
+        {(!profile || profile.negative) && (
+          <input placeholder="Avoid" value={choices.negative} onChange={(e) => update({ negative: e.target.value })} />
+        )}
         <div className="row">
-          <span className="muted small">Random seed, batch of 1</span>
-          <button disabled={!canGenerate} onClick={generate}>
+          <span className="muted small">{choices.seed === null ? "Random seed" : `Seed ${choices.seed}`}</span>
+          <button className="primary" disabled={!canGenerate} onClick={generate}>
             {running ? "Generating…" : "Generate"}
           </button>
         </div>
@@ -96,9 +423,7 @@ export function App() {
           {preview ? <img src={preview} alt="Latest result" /> : <span className="muted">Your image appears here</span>}
           {running && (
             <div className="progress">
-              <span className="small muted">
-                Step {status.step} of {status.of}
-              </span>
+              <span className="small muted">Step {status.step} of {status.of}</span>
               <div className="bar">
                 <div style={{ width: `${(100 * status.step) / Math.max(status.of, 1)}%` }} />
               </div>
@@ -106,11 +431,29 @@ export function App() {
           )}
         </div>
         {status.kind === "error" && <p className="error">{status.message}</p>}
+        {selected && !running && (
+          <div className="row">
+            <span className="muted small">
+              {familyName(selected.settings.family)}, seed {selected.settings.seed}
+              {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
+            </span>
+            <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
+          </div>
+        )}
 
         {history.length > 0 && (
           <div className="history">
-            {history.map((img) => (
-              <img key={img.filename} src={imageUrl(img)} alt="" onClick={() => setPreview(imageUrl(img))} />
+            {history.map((h) => (
+              <img
+                key={h.image.filename}
+                src={imageUrl(h.image)}
+                alt=""
+                className={selected === h ? "on" : ""}
+                onClick={() => {
+                  setPreview(imageUrl(h.image));
+                  setSelected(h);
+                }}
+              />
             ))}
           </div>
         )}

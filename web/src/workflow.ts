@@ -169,14 +169,22 @@ const withPrefix = (prefix: string | undefined, text: string) =>
 const basename = (path: string) => (path.split(/[\\/]/).pop() ?? path).toLowerCase();
 
 const QWEN = { "4b": /qwen.?3.?4b/i, "9b": /qwen.?3.?8b/i } as Record<string, RegExp>;
+const QWEN_VL = /qwen.?3.?vl/i;
 const QWEN_FILE = { "4b": "qwen_3_4b.safetensors", "9b": "qwen_3_8b_fp8mixed.safetensors" } as Record<string, string>;
 
 /** Pick the text encoders and VAE a diffusion-only Flux model needs from what's on disk. */
 export function pickParts(family: Family, variant: string | null | undefined, textEncoders: string[], vaes: string[]): Parts {
-  if (PROFILES[family].arch === "flux2") {
+  const arch = PROFILES[family].arch;
+  if (arch === "krea2") {
+    return {
+      qwen: textEncoders.find((n) => QWEN_VL.test(basename(n))),
+      vae: vaes.find((n) => /qwen.?image/.test(basename(n))),
+    };
+  }
+  if (arch === "flux2") {
     const pattern = (variant && QWEN[variant]) || /qwen.?3/i;
     return {
-      qwen: textEncoders.find((n) => pattern.test(basename(n))),
+      qwen: textEncoders.find((n) => pattern.test(basename(n)) && !QWEN_VL.test(basename(n))),
       vae: vaes.find((n) => /flux.?2/.test(basename(n))),
     };
   }
@@ -208,6 +216,11 @@ export function modelProblems(
   }
   if (arch === "sd") return ["This file has no text encoders or VAE. Use the full checkpoint for this model instead."];
   const problems: string[] = [];
+  if (arch === "krea2") {
+    if (!parts.qwen) problems.push("Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.");
+    if (!parts.vae) problems.push("Add the Qwen Image VAE (qwen_image_vae.safetensors) to models/vae.");
+    return problems;
+  }
   if (arch === "flux2") {
     const want = (s.variant && QWEN_FILE[s.variant]) || "qwen_3_4b.safetensors or qwen_3_8b_fp8mixed.safetensors";
     if (!parts.qwen) problems.push(`Add the Qwen3 text encoder (${want}) to models/text_encoders.`);
@@ -248,8 +261,8 @@ export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolea
   } else {
     MODEL = [g.add("UNETLoader", { unet_name: s.model.name, weight_dtype: "default" }), 0];
     CLIP =
-      p.arch === "flux2"
-        ? [g.add("CLIPLoader", { clip_name: parts.qwen, type: "flux2", device: "default" }), 0]
+      p.arch === "flux2" || p.arch === "krea2"
+        ? [g.add("CLIPLoader", { clip_name: parts.qwen, type: p.arch, device: "default" }), 0]
         : [g.add("DualCLIPLoader", { clip_name1: parts.t5, clip_name2: parts.clipL, type: "flux" }), 0];
     VAE = [g.add("VAELoader", { vae_name: parts.vae }), 0];
   }
@@ -257,6 +270,11 @@ export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolea
   // 2. Patch the model: LoRAs chain in order
   for (const lora of s.loras) {
     if (!lora.name) continue;
+    // Krea 2 LoRAs only touch the diffusion model, as in ComfyUI's template.
+    if (p.arch === "krea2") {
+      MODEL = [g.add("LoraLoaderModelOnly", { model: MODEL, lora_name: lora.name, strength_model: lora.weight }), 0];
+      continue;
+    }
     const n = g.add("LoraLoader", {
       model: MODEL,
       clip: CLIP,
@@ -273,7 +291,7 @@ export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolea
   if (p.guidance !== undefined) POSITIVE = [g.add("FluxGuidance", { conditioning: POSITIVE, guidance: p.guidance }), 0];
   let NEGATIVE: Link;
   if (p.negative) NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.negativePrefix, s.negative) }), 0];
-  else if (p.arch === "flux2") NEGATIVE = [g.add("ConditioningZeroOut", { conditioning: POSITIVE }), 0];
+  else if (p.arch === "flux2" || p.arch === "krea2") NEGATIVE = [g.add("ConditioningZeroOut", { conditioning: POSITIVE }), 0];
   else NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: "" }), 0];
 
   const addons = s.addons ?? {};

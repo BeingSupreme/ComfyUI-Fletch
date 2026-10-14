@@ -18,8 +18,9 @@ The built app ships in `dist/`, so there's nothing to build to use it.
 
 ## What works now
 
-- **Pick a model, Fletch sets it up.** It reads the model file's header (not the weights) to tell SD 1.5, SDXL, Pony, Illustrious, Flux.1 and Flux.2 Klein apart, then fills in size, steps, CFG, sampler, clip skip and any quality tags that family expects. The family badge under the model shows what was detected; change it if detection gets it wrong.
+- **Pick a model, Fletch sets it up.** It reads the model file's header (not the weights) to tell SD 1.5, SDXL, Pony, Illustrious, Flux.1, Flux.2 Klein and Krea 2 apart, then fills in size, steps, CFG, sampler, clip skip and any quality tags that family expects. The family badge under the model shows what was detected; change it if detection gets it wrong.
 - **Flux without wiring.** Pick a Flux model from `models/diffusion_models` and Fletch finds its text encoders and VAE for you: T5 + CLIP-L + `ae` for Flux.1, the matching Qwen3 encoder (4B or 8B) + `flux2-vae` for Flux.2 Klein. If one is missing, it says which file to add. Flux files without a text encoder built in belong in `models/diffusion_models`, not `models/checkpoints`; Fletch tells you if one is in the wrong place.
+- **Krea 2 Turbo.** Put `krea2_turbo_fp8_scaled.safetensors` in `models/diffusion_models`, `qwen3vl_4b_fp8_scaled.safetensors` in `models/text_encoders` and `qwen_image_vae.safetensors` in `models/vae` (all from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2)). Fletch runs it at 8 steps and CFG 1 like ComfyUI's template. Needs ComfyUI 0.25 or newer. Krea 2 style LoRAs work too.
 - **Shape and Quality** instead of width, height and steps. Each family maps them to sizes and step counts that suit it.
 - **LoRA** add-on. The list only shows LoRAs made for the current model's family (plus any it can't identify). Add as many as you like, each with its own weight.
 - **Advanced** holds steps, CFG, sampler, scheduler, clip skip and seed, pre-filled from the family's defaults.
@@ -35,9 +36,9 @@ Each add-on is a switch in the left column. Fletch wires the nodes in for you. I
 - **Pose or edge guide** (ControlNet) makes the image follow another picture's edges, pose or depth. Put ControlNet models in `models/controlnet`; Fletch only lists ones that match your model's family. Edges work out of the box; pose and depth need [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux). "Use as-is" takes a picture that's already a pose or edge map.
 - **Upscale** enlarges the final image with an upscale model from `models/upscale_models` (for example 4x-UltraSharp).
 
-Face fix and the guide aren't available for Flux.2 Klein yet.
+Face fix and the guide aren't available for Flux.2 Klein yet, and the guide isn't available for Krea 2.
 
-SD 2.x, SD 3.5 and FLUX.2 dev models are recognised but not supported yet.
+SD 2.x, SD 3.5, FLUX.2 dev and Krea 2 RAW models are recognised but not supported yet.
 
 ## Develop
 

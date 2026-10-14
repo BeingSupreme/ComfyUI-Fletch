@@ -11,11 +11,12 @@ import struct
 
 MAX_HEADER = 100 * 1024 * 1024
 
-# Families Fletch has profiles for. "sd2", "sd3" and "flux2" (FLUX.2 dev) are recognised so
-# the UI can say they aren't supported yet rather than guessing wrong.
+# Families Fletch has profiles for. "sd2", "sd3", "flux2" (FLUX.2 dev) and "krea2_raw" are
+# recognised so the UI can say they aren't supported yet rather than guessing wrong.
 FAMILIES = (
     "sd15", "sd2", "sdxl", "pony", "illustrious", "sd3",
     "flux_dev", "flux_schnell", "flux2", "flux2_klein", "flux2_klein_base",
+    "krea2_turbo", "krea2_raw",
 )
 
 # FLUX.2 text-input width = 3 x the text encoder's hidden size. FLUX.1 reads T5 at 4096.
@@ -94,7 +95,10 @@ def classify_model(name, tensors, metadata):
     )
 
     variant = None
-    if _any(keys, "double_blocks.") and _any(keys, "single_blocks."):
+    if _any(keys, "txtfusion.projector.weight"):
+        # Krea 2: RAW and Turbo share one layout, so only the filename tells them apart.
+        family = "krea2_raw" if re.search(r"raw|base", os.path.basename(name).lower()) else "krea2_turbo"
+    elif _any(keys, "double_blocks.") and _any(keys, "single_blocks."):
         family, variant = _flux(name, tensors)
     elif _any(keys, "joint_blocks."):
         family = "sd3"
@@ -112,11 +116,13 @@ FLUX2_LINEAR1 = {27648, 36864}
 
 
 def classify_lora(name, tensors, metadata):
-    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2" or None.
+    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2", "krea2" or None.
 
     Pony and Illustrious LoRAs come back as "sdxl" since they load on any SDXL model.
     """
     base = str(metadata.get("ss_base_model_version", "")).lower()
+    if "krea2" in base or "krea_2" in base or "krea-2" in base:
+        return "krea2"
     if "flux2" in base or "flux.2" in base or "klein" in base:
         return "flux2"
     if "flux" in base:
@@ -127,6 +133,9 @@ def classify_lora(name, tensors, metadata):
         return "sd15"
 
     keys = tensors.keys()
+    # Krea 2 layer names: native (attn.wq, txtfusion) or diffusers (attn.to_gate, text_fusion).
+    if any(re.search(r"txtfusion|text_fusion|attn[._](wq|to_gate)[._]", k) for k in keys):
+        return "krea2"
     if _any(keys, "double_blocks") or _any(keys, "single_transformer_blocks") or _any(keys, "single_blocks"):
         for key, shape in tensors.items():
             if re.search(r"single_blocks[._]\d+[._]linear1\.(lora_up|lora_B)\.weight$", key) and shape:

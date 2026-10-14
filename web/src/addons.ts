@@ -29,7 +29,7 @@ export const GUIDE_MODES: [GuideMode, string][] = [
   ["asis", "Use as-is"],
 ];
 
-const LORA_BASE_WORDS: Record<string, string> = { sd15: "SD 1.5", sdxl: "SDXL", flux: "Flux.1", flux2: "Flux.2" };
+const LORA_BASE_WORDS: Record<string, string> = { sd15: "SD 1.5", sdxl: "SDXL", flux: "Flux.1", flux2: "Flux.2", krea2: "Krea 2" };
 
 export const faceDetectors = (catalog: Catalog) => catalog.detectors.filter((d) => /face/i.test(d));
 
@@ -44,6 +44,8 @@ export function guideModeAvailable(mode: GuideMode, catalog: Catalog) {
 /** null when an add-on can run, otherwise what's missing, in words a person can act on. */
 export function unavailable(profile: Profile | null, catalog: Catalog, controlnets: LoraInfo[]): Record<AddonKey, string | null> {
   const flux2 = profile?.arch === "flux2" ? "Not available for Flux.2 models yet." : null;
+  // No ControlNets exist for Krea 2 yet.
+  const noGuide = profile?.arch === "krea2" ? "Not available for Krea 2 yet." : flux2;
   return {
     source: null,
     hires: null,
@@ -56,7 +58,7 @@ export function unavailable(profile: Profile | null, catalog: Catalog, controlne
           ? null
           : "Add a face detection model (face_yolov8m.pt) to models/ultralytics/bbox."),
     guide:
-      flux2 ??
+      noGuide ??
       (profile && controlnetsFor(profile, controlnets).length === 0
         ? `Add a ${LORA_BASE_WORDS[profile.loraBase]} ControlNet model to models/controlnet.`
         : null),

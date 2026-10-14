@@ -188,3 +188,24 @@ def test_controlnet_families(tmp_path):
     assert controlnet(tmp_path, "cnxl.safetensors", sdxl) == "sdxl"
     assert controlnet(tmp_path, "cnflux.safetensors", flux) == "flux"
     assert controlnet(tmp_path, "cn_unknown.safetensors", {"x": [1]}) is None
+
+
+KREA2 = {
+    "txtfusion.projector.weight": [3072, 12],
+    "txtfusion.layerwise_blocks.0.prenorm.scale": [2560],
+    "first.weight": [3072, 64],
+    "blocks.0.attn.wq.weight": [3072, 3072],
+}
+
+
+def test_krea2_turbo_and_raw(tmp_path):
+    assert model(tmp_path, "krea2_turbo_fp8_scaled.safetensors", KREA2) == {
+        "family": "krea2_turbo", "variant": None, "has_vae": False, "has_text_encoders": False,
+    }
+    assert model(tmp_path, "krea2_raw_bf16.safetensors", KREA2)["family"] == "krea2_raw"
+
+
+def test_lora_krea2(tmp_path):
+    assert lora(tmp_path, "krea2_darkbrush.safetensors", {"diffusion_model.blocks.0.attn.wq.lora_A.weight": [16, 3072]}) == "krea2"
+    assert lora(tmp_path, "k2_diffusers.safetensors", {"transformer.transformer_blocks.0.attn.to_gate.lora_A.weight": [16, 3072]}) == "krea2"
+    assert lora(tmp_path, "k2_meta.safetensors", {"x": [1]}, {"ss_base_model_version": "krea2"}) == "krea2"

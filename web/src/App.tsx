@@ -402,7 +402,7 @@ export function App() {
                   <select value={l.name} onChange={(e) => setLora(i, { name: e.target.value })}>
                     <option value="">Choose a LoRA</option>
                     {compatibleLoras.length > 0 && (
-                      <optgroup label={`For ${profile!.loraBase === "sdxl" ? "SDXL, Pony and Illustrious" : profile!.loraBase === "flux2" ? "Flux.2 Klein" : familyName(family!)}`}>
+                      <optgroup label={`For ${profile!.loraBase === "sdxl" ? "SDXL, Pony and Illustrious" : profile!.loraBase === "flux2" ? "Flux.2 Klein" : profile!.loraBase === "krea2" ? "Krea 2" : familyName(family!)}`}>
                         {compatibleLoras.map((x) => (
                           <option key={x.name}>{x.name}</option>
                         ))}

@@ -22,6 +22,7 @@ const OUTPUTS: Record<string, number> = {
   DualCLIPLoader: 1,
   VAELoader: 1,
   LoraLoader: 2,
+  LoraLoaderModelOnly: 1,
   CLIPSetLastLayer: 1,
   CLIPTextEncode: 1,
   FluxGuidance: 1,
@@ -214,6 +215,44 @@ describe("compile", () => {
     const s = { ...klein("flux2_klein"), model: { folder: "checkpoints" as const, name: "Flux Klein FP8.safetensors" } };
     expect(() => compile(s, kleinParts, false)).toThrow(/Move it to models\/diffusion_models/);
     expect(compile(s, kleinParts, true)).toBeTruthy();
+  });
+});
+
+describe("Krea 2", () => {
+  const krea = {
+    ...base,
+    model: { folder: "diffusion_models" as const, name: "krea2_turbo_fp8_scaled.safetensors" },
+    family: "krea2_turbo" as const,
+  };
+  const kreaParts = { qwen: "qwen3vl_4b_fp8_scaled.safetensors", vae: "qwen_image_vae.safetensors" };
+
+  it("builds Krea 2 Turbo the way ComfyUI's own template does", () => {
+    const wf = compile({ ...krea, loras: [{ name: "krea2_darkbrush.safetensors", weight: 0.8 }] }, kreaParts);
+    expectWellFormed(wf);
+    expect(one(wf, "CLIPLoader")[1].inputs).toEqual({ clip_name: "qwen3vl_4b_fp8_scaled.safetensors", type: "krea2", device: "default" });
+    expect(one(wf, "VAELoader")[1].inputs).toEqual({ vae_name: "qwen_image_vae.safetensors" });
+    expect(byType(wf, "LoraLoader")).toHaveLength(0);
+    const [loraId, lora] = one(wf, "LoraLoaderModelOnly");
+    expect(lora.inputs).toMatchObject({ lora_name: "krea2_darkbrush.safetensors", strength_model: 0.8 });
+    const ks = one(wf, "KSampler")[1].inputs;
+    expect(ks).toMatchObject({ steps: 8, cfg: 1, sampler_name: "euler", scheduler: "simple", denoise: 1 });
+    expect(ks.model).toEqual([loraId, 0]);
+    expect(follow(wf, ks.negative).class_type).toBe("ConditioningZeroOut");
+    expect(follow(wf, ks.latent_image).class_type).toBe("EmptyLatentImage");
+  });
+
+  it("says which Krea 2 files to add", () => {
+    expect(modelProblems(krea, {})).toEqual([
+      "Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.",
+      "Add the Qwen Image VAE (qwen_image_vae.safetensors) to models/vae.",
+    ]);
+  });
+
+  it("finds the Qwen3-VL encoder and Qwen Image VAE, and keeps Klein off the VL encoder", () => {
+    const encoders = ["qwen3vl_4b_fp8_scaled.safetensors", "qwen_3_4b.safetensors"];
+    const vaes = ["flux2-vae.safetensors", "qwen_image_vae.safetensors"];
+    expect(pickParts("krea2_turbo", null, encoders, vaes)).toEqual(kreaParts);
+    expect(pickParts("flux2_klein", null, encoders, vaes).qwen).toBe("qwen_3_4b.safetensors");
   });
 });
 

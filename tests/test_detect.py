@@ -172,3 +172,19 @@ def test_lora_flux1_vs_flux2_by_linear1(tmp_path):
     assert lora(tmp_path, "i.safetensors", f1) == "flux"
     assert lora(tmp_path, "j.safetensors", f2) == "flux2"
     assert lora(tmp_path, "k.safetensors", {}, {"ss_base_model_version": "flux2_klein_9b"}) == "flux2"
+
+
+def controlnet(tmp_path, name, tensors, metadata=None):
+    path = tmp_path / name
+    write_safetensors(path, tensors, metadata)
+    return detect.cached("controlnet", str(path))
+
+
+def test_controlnet_families(tmp_path):
+    sd15 = {"control_model.input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight": [320, 768]}
+    sdxl = {"down_blocks.1.attentions.0.transformer_blocks.0.attn2.to_k.weight": [640, 2048]}
+    flux = {"double_blocks.0.img_attn.qkv.weight": [9216, 3072], "controlnet_blocks.0.weight": [3072, 3072]}
+    assert controlnet(tmp_path, "cn15.safetensors", sd15) == "sd15"
+    assert controlnet(tmp_path, "cnxl.safetensors", sdxl) == "sdxl"
+    assert controlnet(tmp_path, "cnflux.safetensors", flux) == "flux"
+    assert controlnet(tmp_path, "cn_unknown.safetensors", {"x": [1]}) is None

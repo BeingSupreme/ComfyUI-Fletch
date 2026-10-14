@@ -26,17 +26,20 @@
 body { margin: 0; background: var(--bg); color: var(--text); }
 .app {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   padding: 16px;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
 }
 header { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
 header strong { margin-right: auto; font-size: 18px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .dot.on { background: #12b76a; }
-aside, main { display: flex; flex-direction: column; gap: 12px; }
+aside, main { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+aside { overflow-y: auto; padding-right: 4px; }
+main { overflow-y: auto; }
 .label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
@@ -50,17 +53,23 @@ button { width: auto; cursor: pointer; }
 button.primary { padding: 10px 24px; font-weight: 600; border: 2px solid var(--accent); }
 button:disabled { opacity: 0.5; cursor: default; }
 .preview {
-  position: relative; display: grid; place-items: center; min-height: 420px;
+  position: relative; display: grid; place-items: center; flex: 1 1 auto; min-height: 240px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden;
 }
-.preview img { max-width: 100%; max-height: 70vh; }
+.preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .progress { position: absolute; left: 16px; right: 16px; bottom: 16px; }
 .bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 4px; }
 .bar div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.2s; }
 .error { color: var(--error); margin: 0; }
-.history { display: flex; gap: 12px; overflow-x: auto; }
+.history { display: flex; gap: 12px; overflow-x: auto; flex: none; padding-bottom: 4px; }
 .history img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); }
-@media (max-width: 720px) { .app { grid-template-columns: 1fr; } }
+@media (max-width: 720px) {
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; height: auto; }
+  aside, main { overflow: visible; }
+  main { order: -1; }
+  header { order: -2; }
+  .preview { min-height: 60vw; }
+}
 section { display: flex; flex-direction: column; gap: 6px; }
 .chips { display: flex; gap: 8px; }
 .chip { flex: 1; padding: 6px 0; border-radius: 999px; border: 1px solid var(--border); font-weight: 400; }
@@ -80,3 +89,25 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .advanced { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .advanced button { grid-column: 1 / -1; justify-self: start; }
 .history img.on { border: 2px solid var(--accent); }
+
+select { max-width: 100%; text-overflow: ellipsis; }
+.generate { display: flex; align-items: center; gap: 12px; }
+.actions { display: flex; gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+.row { flex-wrap: wrap; }
+.toggle.disabled { opacity: 0.55; }
+.note { margin: 0; }
+.slider { display: flex; align-items: center; gap: 8px; }
+.slider input[type="range"] { flex: 1; padding: 0; border: none; background: none; accent-color: var(--accent); }
+.drop {
+  display: grid; place-items: center; min-height: 72px; padding: 8px; cursor: pointer;
+  border: 1.5px dashed var(--border); border-radius: 8px; text-align: center;
+}
+.drop img { max-width: 100%; max-height: 160px; border-radius: 4px; }
+.modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px; background: rgba(0, 0, 0, 0.6); }
+.modal-body {
+  display: flex; flex-direction: column; gap: 10px; max-width: 100%; max-height: 100%;
+  padding: 16px; border-radius: 10px; background: var(--panel); overflow: auto;
+}
+.paint { position: relative; align-self: center; line-height: 0; }
+.paint img { max-width: min(90vw, 1024px); max-height: 70vh; user-select: none; }
+.paint canvas { opacity: 0.55; position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }

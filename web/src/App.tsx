@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
+import { AddonCards } from "./AddonCards";
+import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
+import { MaskPainter } from "./MaskPainter";
 import {
   connect,
   imageUrl,
+  inputImageUrl,
+  listControlnets,
   listLoras,
   loadCatalog,
   modelInfo,
   queuePrompt,
+  uploadImage,
   watch,
   type Catalog,
   type ImageRef,
@@ -46,6 +52,7 @@ interface Choices {
   advanced: Advanced;
   /** Fixed seed, or null for a new random seed every run. */
   seed: number | null;
+  addons: AddonChoices;
 }
 
 const DEFAULT_CHOICES: Choices = {
@@ -58,9 +65,29 @@ const DEFAULT_CHOICES: Choices = {
   loras: [{ name: "", weight: 0.8 }],
   advanced: {},
   seed: null,
+  addons: DEFAULT_ADDONS,
 };
 
-const EMPTY_CATALOG: Catalog = { checkpoints: [], diffusionModels: [], textEncoders: [], vaes: [], samplers: [], schedulers: [] };
+/** Saved choices from an older version may lack newer fields; fill them from the defaults. */
+function loadChoices(): Choices {
+  const saved = load<Partial<Choices>>("choices", {});
+  const addons = Object.fromEntries(
+    (Object.keys(DEFAULT_ADDONS) as AddonKey[]).map((k) => [k, { ...DEFAULT_ADDONS[k], ...saved.addons?.[k] }]),
+  ) as unknown as AddonChoices;
+  return { ...DEFAULT_CHOICES, ...saved, addons };
+}
+
+const EMPTY_CATALOG: Catalog = {
+  checkpoints: [],
+  diffusionModels: [],
+  textEncoders: [],
+  vaes: [],
+  samplers: [],
+  schedulers: [],
+  upscaleModels: [],
+  detectors: [],
+  nodes: {},
+};
 
 const modelKey = (m: { folder: string; name: string }) => `${m.folder}:${m.name}`;
 
@@ -94,7 +121,9 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [catalog, setCatalog] = useState<Catalog>(EMPTY_CATALOG);
   const [loras, setLoras] = useState<LoraInfo[]>([]);
-  const [choices, setChoices] = useState<Choices>(() => ({ ...DEFAULT_CHOICES, ...load("choices", {}) }));
+  const [choices, setChoices] = useState<Choices>(loadChoices);
+  const [controlnets, setControlnets] = useState<LoraInfo[]>([]);
+  const [painting, setPainting] = useState(false);
   const [detected, setDetected] = useState<{
     key: string;
     family: string | null;
@@ -110,6 +139,8 @@ export function App() {
 
   const update = (patch: Partial<Choices>) => setChoices((c) => ({ ...c, ...patch }));
   const setAdvanced = (patch: Partial<Advanced>) => setChoices((c) => ({ ...c, advanced: { ...c.advanced, ...patch } }));
+  const setAddon = <K extends AddonKey>(key: K, patch: Partial<AddonChoices[K]>) =>
+    setChoices((c) => ({ ...c, addons: { ...c.addons, [key]: { ...c.addons[key], ...patch } } }));
 
   useEffect(() => save("choices", choices), [choices]);
   useEffect(() => save("history", history), [history]);
@@ -130,6 +161,7 @@ export function App() {
       });
     });
     listLoras().then(setLoras, () => setLoras([]));
+    listControlnets().then(setControlnets, () => setControlnets([]));
   }, [connected]);
 
   // Detect the family of the chosen model.
@@ -154,10 +186,15 @@ export function App() {
     [family, variant, catalog],
   );
   const problems = choices.model && family ? modelProblems({ model: choices.model, family, variant }, parts, current?.hasTextEncoders) : [];
-  const numbers = family ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced: choices.advanced }) : null;
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
   const usableLoras = new Set([...compatibleLoras, ...unknownLoras].map((l) => l.name));
+  const blocked = unavailable(profile, catalog, controlnets);
+  const usableControlnets = new Set(profile ? controlnetsFor(profile, controlnets).map((c) => c.name) : []);
+  const runAddons = addonsForRun(choices.addons, blocked, catalog, usableControlnets);
+  const numbers = family
+    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced: choices.advanced, addons: runAddons })
+    : null;
 
   function settingsForRun(): Settings | null {
     if (!choices.model || !family) return null;
@@ -173,6 +210,7 @@ export function App() {
       loras: choices.lorasOn ? choices.loras.filter((l) => usableLoras.has(l.name)) : [],
       seed: choices.seed ?? randomSeed(),
       advanced: choices.advanced,
+      addons: runAddons,
     };
   }
 
@@ -183,7 +221,7 @@ export function App() {
     setPreview(null);
     setSelected(null);
     try {
-      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders), { fletch: settings });
+      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders, catalog.nodes), { fletch: settings });
       const stop = watch(id, (e) => {
         if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
         else if (e.kind === "preview") setPreview(e.url);
@@ -219,7 +257,36 @@ export function App() {
       loras: s.loras.length ? s.loras : c.loras,
       advanced: s.advanced,
       seed: s.seed,
+      addons: {
+        source: { ...c.addons.source, on: !!s.addons?.source, ...s.addons?.source },
+        hires: { ...c.addons.hires, on: !!s.addons?.hires, ...s.addons?.hires },
+        upscale: { ...c.addons.upscale, on: !!s.addons?.upscale, ...s.addons?.upscale },
+        faceFix: { ...c.addons.faceFix, on: !!s.addons?.faceFix, ...s.addons?.faceFix },
+        guide: { ...c.addons.guide, on: !!s.addons?.guide, ...s.addons?.guide },
+      },
     }));
+  }
+
+  /** Use a finished image as the start image for the next run. */
+  async function startFrom(entry: HistoryEntry) {
+    try {
+      const blob = await (await fetch(imageUrl(entry.image))).blob();
+      setAddon("source", { on: true, image: await uploadImage(blob, entry.image.filename), masked: undefined });
+    } catch (e) {
+      setStatus({ kind: "error", message: String((e as Error).message ?? e) });
+    }
+  }
+
+  async function saveMask(masked: Blob) {
+    setPainting(false);
+    const src = choices.addons.source.image;
+    if (!src) return;
+    try {
+      const base = src.name.split("/").pop()!.replace(/\.[^.]+$/, "");
+      setAddon("source", { masked: await uploadImage(masked, `${base}-mask.png`), strength: Math.max(choices.addons.source.strength, 0.85) });
+    } catch (e) {
+      setStatus({ kind: "error", message: String((e as Error).message ?? e) });
+    }
   }
 
   const setLora = (i: number, patch: Partial<LoraChoice>) =>
@@ -310,7 +377,11 @@ export function App() {
 
         <section>
           <span className="label">Shape</span>
-          <Chips options={SHAPES} value={choices.shape} onChange={(shape) => update({ shape })} />
+          {runAddons.source ? (
+            <p className="muted small">Follows your start image</p>
+          ) : (
+            <Chips options={SHAPES} value={choices.shape} onChange={(shape) => update({ shape })} />
+          )}
         </section>
 
         <section>
@@ -364,6 +435,17 @@ export function App() {
               </button>
             </div>
           )}
+
+          <AddonCards
+            addons={choices.addons}
+            set={setAddon}
+            blocked={blocked}
+            profile={profile}
+            catalog={catalog}
+            controlnets={controlnets}
+            onPaint={() => setPainting(true)}
+            onError={(message) => setStatus({ kind: "error", message })}
+          />
         </section>
 
         <details>
@@ -434,11 +516,11 @@ export function App() {
         {(!profile || profile.negative) && (
           <input placeholder="Avoid" value={choices.negative} onChange={(e) => update({ negative: e.target.value })} />
         )}
-        <div className="row">
-          <span className="muted small">{choices.seed === null ? "Random seed" : `Seed ${choices.seed}`}</span>
+        <div className="generate">
           <button className="primary" disabled={!canGenerate} onClick={generate}>
             {running ? "Generating…" : "Generate"}
           </button>
+          <span className="muted small">{choices.seed === null ? "Random seed" : `Seed ${choices.seed}`}</span>
         </div>
 
         <div className="preview">
@@ -459,7 +541,10 @@ export function App() {
               {familyName(selected.settings.family)}, seed {selected.settings.seed}
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
-            <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
+            <span className="actions">
+              <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
+            </span>
           </div>
         )}
 
@@ -480,6 +565,13 @@ export function App() {
           </div>
         )}
       </main>
+      {painting && choices.addons.source.image && (
+        <MaskPainter
+          src={inputImageUrl(choices.addons.source.image)}
+          onDone={saveMask}
+          onCancel={() => setPainting(false)}
+        />
+      )}
     </div>
   );
 }

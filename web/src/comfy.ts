@@ -1,7 +1,7 @@
 // Thin client for ComfyUI's HTTP and websocket API. Fletch is served by ComfyUI itself,
 // so every call is same-origin (the Vite dev server proxies them in development).
 
-import type { ApiWorkflow } from "./workflow";
+import type { ApiWorkflow, InputImage, NodeInfo, NodeInfos } from "./workflow";
 
 export interface ImageRef {
   filename: string;
@@ -50,19 +50,71 @@ export interface Catalog {
   vaes: string[];
   samplers: string[];
   schedulers: string[];
+  upscaleModels: string[];
+  /** Detection models for face fix (Impact Subpack's UltralyticsDetectorProvider). */
+  detectors: string[];
+  /** /object_info for the custom nodes add-ons use; missing means not installed. */
+  nodes: NodeInfos;
+}
+
+/** Custom nodes whose presence (and defaults) add-ons depend on. */
+const OPTIONAL_NODES = [
+  "FaceDetailer",
+  "UltralyticsDetectorProvider",
+  "DWPreprocessor",
+  "OpenposePreprocessor",
+  "DepthAnythingV2Preprocessor",
+  "DepthAnythingPreprocessor",
+  "MiDaS-DepthMapPreprocessor",
+];
+
+async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {
+  try {
+    return (await getJson(`/object_info/${encodeURIComponent(classType)}`))[classType];
+  } catch {
+    return undefined;
+  }
 }
 
 export async function loadCatalog(): Promise<Catalog> {
-  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers] = await Promise.all([
-    listOptions("CheckpointLoaderSimple", "ckpt_name"),
-    listOptions("UNETLoader", "unet_name"),
-    listOptions("DualCLIPLoader", "clip_name1"),
-    listOptions("VAELoader", "vae_name"),
-    listOptions("KSampler", "sampler_name"),
-    listOptions("KSampler", "scheduler"),
-  ]);
-  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers };
+  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, infos] =
+    await Promise.all([
+      listOptions("CheckpointLoaderSimple", "ckpt_name"),
+      listOptions("UNETLoader", "unet_name"),
+      listOptions("DualCLIPLoader", "clip_name1"),
+      listOptions("VAELoader", "vae_name"),
+      listOptions("KSampler", "sampler_name"),
+      listOptions("KSampler", "scheduler"),
+      listOptions("UpscaleModelLoader", "model_name"),
+      listOptions("UltralyticsDetectorProvider", "model_name"),
+      Promise.all(OPTIONAL_NODES.map(nodeInfo)),
+    ]);
+  const nodes = Object.fromEntries(OPTIONAL_NODES.map((n, i) => [n, infos[i]]));
+  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, nodes };
 }
+
+/** Upload a picture to ComfyUI's input folder (under fletch/) so LoadImage can read it. */
+export async function uploadImage(file: Blob, filename: string): Promise<InputImage> {
+  const size = await new Promise<{ width: number; height: number }>((ok, fail) => {
+    const img = new Image();
+    img.onload = () => ok({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => fail(new Error("That file isn't an image Fletch can read."));
+    img.src = URL.createObjectURL(file);
+  });
+  const form = new FormData();
+  form.append("image", file, filename);
+  form.append("subfolder", "fletch");
+  form.append("type", "input");
+  const res = await fetch("/upload/image", { method: "POST", body: form });
+  if (!res.ok) throw new Error(`ComfyUI couldn't save the image (${res.status})`);
+  const body = await res.json();
+  return { name: body.subfolder ? `${body.subfolder}/${body.name}` : body.name, ...size };
+}
+
+export const inputImageUrl = (img: InputImage) => {
+  const i = img.name.lastIndexOf("/");
+  return imageUrl({ filename: img.name.slice(i + 1), subfolder: i < 0 ? "" : img.name.slice(0, i), type: "input" });
+};
 
 export interface ModelInfo {
   family: string | null;
@@ -81,6 +133,8 @@ export interface LoraInfo {
 }
 
 export const listLoras = (): Promise<LoraInfo[]> => getJson("/fletch/api/loras");
+
+export const listControlnets = (): Promise<LoraInfo[]> => getJson("/fletch/api/controlnets");
 
 /** Queue a workflow. `extra` is written into the saved PNG's metadata by SaveImage. */
 export async function queuePrompt(prompt: ApiWorkflow, extra?: Record<string, unknown>): Promise<string> {

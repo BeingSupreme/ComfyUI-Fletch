@@ -31,6 +31,84 @@ export interface Advanced {
   clipSkip?: number;
 }
 
+/** An image uploaded to ComfyUI's input folder, by the name LoadImage takes. */
+export interface InputImage {
+  name: string;
+  width: number;
+  height: number;
+}
+
+/** Start from an image (img2img), optionally repainting only a masked area (inpaint). */
+export interface SourceAddon {
+  image: InputImage;
+  /** Same picture with the area to repaint made transparent; LoadImage reads that as the mask. */
+  masked?: InputImage;
+  /** How much to change: 0 keeps the image, 1 ignores it. */
+  strength: number;
+}
+
+export interface HiresAddon {
+  scale: number;
+  strength: number;
+}
+
+export interface UpscaleAddon {
+  model: string;
+}
+
+export interface FaceFixAddon {
+  detector: string;
+  strength: number;
+}
+
+export type GuideMode = "canny" | "pose" | "depth" | "asis";
+
+export interface GuideAddon {
+  image: InputImage;
+  mode: GuideMode;
+  model: string;
+  strength: number;
+}
+
+export interface Addons {
+  source?: SourceAddon;
+  hires?: HiresAddon;
+  upscale?: UpscaleAddon;
+  faceFix?: FaceFixAddon;
+  guide?: GuideAddon;
+}
+
+/**
+ * Node classes some add-ons need beyond ComfyUI's core, with the preprocessor each guide mode
+ * uses. Custom nodes have many inputs that change between versions, so their values come from
+ * the node's own defaults (ComfyUI's /object_info) and only the ones Fletch cares about are set.
+ */
+export const GUIDE_PREPROCESSORS: Record<GuideMode, string[]> = {
+  canny: ["Canny"],
+  pose: ["DWPreprocessor", "OpenposePreprocessor"],
+  depth: ["DepthAnythingV2Preprocessor", "DepthAnythingPreprocessor", "MiDaS-DepthMapPreprocessor"],
+  asis: [],
+};
+
+/** ComfyUI's description of one node class, as /object_info/<class> returns it. */
+export interface NodeInfo {
+  input?: { required?: Record<string, unknown[]>; optional?: Record<string, unknown[]> };
+}
+
+export type NodeInfos = Record<string, NodeInfo | undefined>;
+
+/** Every widget input of a node at its default value; links are left for the caller. */
+export function nodeDefaults(info: NodeInfo | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, spec] of Object.entries(info?.input?.required ?? {})) {
+    const [type, opts] = spec as [unknown, Record<string, unknown> | undefined];
+    if (Array.isArray(type)) out[name] = type[0];
+    else if (type === "COMBO") out[name] = opts?.default ?? (opts?.options as unknown[] | undefined)?.[0];
+    else if (["INT", "FLOAT", "BOOLEAN", "STRING"].includes(type as string)) out[name] = opts?.default ?? (type === "STRING" ? "" : 0);
+  }
+  return out;
+}
+
 export interface Settings {
   model: { folder: ModelFolder; name: string };
   family: Family;
@@ -43,6 +121,7 @@ export interface Settings {
   loras: LoraChoice[];
   seed: number;
   advanced: Advanced;
+  addons?: Addons;
 }
 
 /** Separate files a diffusion-only model needs (Flux ships without encoders or VAE). */
@@ -55,10 +134,24 @@ export interface Parts {
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
 
+const snap = (n: number) => Math.max(64, Math.round(n / 64) * 64);
+
+/**
+ * Output size. With a source image the size follows its aspect ratio at the family's native
+ * pixel count (so inpaint masks line up); otherwise it comes from the chosen Shape.
+ */
+export function sizeFor(family: Family, shape: Shape, source?: { width: number; height: number }): [number, number] {
+  const p = PROFILES[family];
+  if (!source) return p.sizes[shape];
+  const [w, h] = p.sizes.square;
+  const ratio = source.width / source.height;
+  return [snap(Math.sqrt(w * h * ratio)), snap(Math.sqrt((w * h) / ratio))];
+}
+
 /** The numbers a run will actually use: profile defaults with Advanced overrides applied. */
-export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced">) {
+export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced" | "addons">) {
   const p = PROFILES[s.family];
-  const [width, height] = p.sizes[s.shape];
+  const [width, height] = sizeFor(s.family, s.shape, s.addons?.source?.image);
   return {
     width,
     height,
@@ -137,7 +230,9 @@ class Graph {
   }
 }
 
-export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolean): ApiWorkflow {
+const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
+
+export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolean, nodes: NodeInfos = {}): ApiWorkflow {
   const problems = modelProblems(s, parts, hasTextEncoders);
   if (problems.length) throw new Error(problems.join(" "));
 
@@ -181,43 +276,131 @@ export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolea
   else if (p.arch === "flux2") NEGATIVE = [g.add("ConditioningZeroOut", { conditioning: POSITIVE }), 0];
   else NEGATIVE = [g.add("CLIPTextEncode", { clip: CLIP, text: "" }), 0];
 
-  // 4. Latent source
-  const LATENT: Link = [g.add(p.latent, { width: r.width, height: r.height, batch_size: 1 }), 0];
+  const addons = s.addons ?? {};
 
-  // 5. Sample
-  let SAMPLES: Link;
-  if (p.arch === "flux2") {
-    // FLUX.2 shifts its noise schedule by resolution, which Flux2Scheduler works out.
-    SAMPLES = [
-      g.add("SamplerCustomAdvanced", {
-        noise: [g.add("RandomNoise", { noise_seed: s.seed }), 0],
-        guider: [g.add("CFGGuider", { model: MODEL, positive: POSITIVE, negative: NEGATIVE, cfg: r.cfg }), 0],
-        sampler: [g.add("KSamplerSelect", { sampler_name: r.sampler }), 0],
-        sigmas: [g.add("Flux2Scheduler", { steps: r.steps, width: r.width, height: r.height }), 0],
-        latent_image: LATENT,
-      }),
+  // 3b. Pose or edge guide (ControlNet), applied to both prompts
+  if (addons.guide) {
+    const gd = addons.guide;
+    let hint: Link = [loadImage(g, gd.image), 0];
+    const pre = GUIDE_PREPROCESSORS[gd.mode].find((c) => c === "Canny" || nodes[c]);
+    if (pre === "Canny") hint = [g.add("Canny", { image: hint, low_threshold: 0.4, high_threshold: 0.8 }), 0];
+    else if (pre) hint = [g.add(pre, { ...nodeDefaults(nodes[pre]), image: hint }), 0];
+    const applied = g.add("ControlNetApplyAdvanced", {
+      positive: POSITIVE,
+      negative: NEGATIVE,
+      control_net: [g.add("ControlNetLoader", { control_net_name: gd.model }), 0],
+      image: hint,
+      strength: gd.strength,
+      start_percent: 0,
+      end_percent: 1,
+      vae: VAE,
+    });
+    [POSITIVE, NEGATIVE] = [[applied, 0], [applied, 1]];
+  }
+
+  // 4. Latent source: empty, or the source image (masked for inpaint)
+  let LATENT: Link;
+  let denoise = 1;
+  if (addons.source) {
+    const src = addons.source;
+    const loaded = loadImage(g, src.masked ?? src.image);
+    const pixels: Link = [
+      g.add("ImageScale", { image: [loaded, 0], upscale_method: "lanczos", width: r.width, height: r.height, crop: "disabled" }),
       0,
     ];
+    LATENT = [g.add("VAEEncode", { pixels, vae: VAE }), 0];
+    if (src.masked) {
+      const mask: Link = [g.add("GrowMask", { mask: [loaded, 1], expand: 6, tapered_corners: true }), 0];
+      LATENT = [g.add("SetLatentNoiseMask", { samples: LATENT, mask }), 0];
+    }
+    denoise = src.strength;
   } else {
-    SAMPLES = [
+    LATENT = [g.add(p.latent, { width: r.width, height: r.height, batch_size: 1 }), 0];
+  }
+
+  // 5. Sample (and again at a larger size for hires fix)
+  const sample = (latent: Link, width: number, height: number, amount: number): Link => {
+    if (p.arch === "flux2") {
+      // FLUX.2 shifts its noise schedule by resolution, which Flux2Scheduler works out.
+      // A partial pass keeps only the tail of that schedule.
+      let sigmas: Link = [g.add("Flux2Scheduler", { steps: r.steps, width, height }), 0];
+      if (amount < 1) sigmas = [g.add("SplitSigmasDenoise", { sigmas, denoise: amount }), 1];
+      return [
+        g.add("SamplerCustomAdvanced", {
+          noise: [g.add("RandomNoise", { noise_seed: s.seed }), 0],
+          guider: [g.add("CFGGuider", { model: MODEL, positive: POSITIVE, negative: NEGATIVE, cfg: r.cfg }), 0],
+          sampler: [g.add("KSamplerSelect", { sampler_name: r.sampler }), 0],
+          sigmas,
+          latent_image: latent,
+        }),
+        0,
+      ];
+    }
+    return [
       g.add("KSampler", {
         model: MODEL,
         positive: POSITIVE,
         negative: NEGATIVE,
-        latent_image: LATENT,
+        latent_image: latent,
         seed: s.seed,
         steps: r.steps,
         cfg: r.cfg,
         sampler_name: r.sampler,
         scheduler: r.scheduler,
-        denoise: 1,
+        denoise: amount,
+      }),
+      0,
+    ];
+  };
+  let SAMPLES = sample(LATENT, r.width, r.height, denoise);
+
+  // 6. Decode
+  let IMAGE: Link = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
+
+  // 6b. Hires fix: enlarge in pixel space (works for every latent format), then refine
+  if (addons.hires) {
+    const { scale, strength } = addons.hires;
+    const big: Link = [g.add("ImageScaleBy", { image: IMAGE, upscale_method: "lanczos", scale_by: scale }), 0];
+    const w = Math.round((r.width * scale) / 8) * 8;
+    const h = Math.round((r.height * scale) / 8) * 8;
+    SAMPLES = sample([g.add("VAEEncode", { pixels: big, vae: VAE }), 0], w, h, strength);
+    IMAGE = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
+  }
+
+  // 6c. Face fix (Impact Pack's FaceDetailer)
+  if (addons.faceFix) {
+    const detector = g.add("UltralyticsDetectorProvider", {
+      ...nodeDefaults(nodes.UltralyticsDetectorProvider),
+      model_name: addons.faceFix.detector,
+    });
+    IMAGE = [
+      g.add("FaceDetailer", {
+        ...nodeDefaults(nodes.FaceDetailer),
+        image: IMAGE,
+        model: MODEL,
+        clip: CLIP,
+        vae: VAE,
+        positive: POSITIVE,
+        negative: NEGATIVE,
+        bbox_detector: [detector, 0],
+        seed: s.seed,
+        steps: Math.min(r.steps, 20),
+        cfg: r.cfg,
+        sampler_name: r.sampler,
+        scheduler: r.scheduler,
+        denoise: addons.faceFix.strength,
       }),
       0,
     ];
   }
 
-  // 6. Decode, 7. save
-  const IMAGE: Link = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
+  // 6d. Upscale with a model (ESRGAN and friends)
+  if (addons.upscale) {
+    const model = g.add("UpscaleModelLoader", { model_name: addons.upscale.model });
+    IMAGE = [g.add("ImageUpscaleWithModel", { upscale_model: [model, 0], image: IMAGE }), 0];
+  }
+
+  // 7. Save
   g.add("SaveImage", { images: IMAGE, filename_prefix: "fletch" });
   return g.nodes;
 }

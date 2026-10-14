@@ -144,6 +144,21 @@ def classify_lora(name, tensors, metadata):
     return None
 
 
+def classify_controlnet(name, tensors, metadata):
+    """Return the base a ControlNet was trained for: "sd15", "sdxl", "flux" or None."""
+    keys = tensors.keys()
+    if _any(keys, "double_blocks") or _any(keys, "single_transformer_blocks"):
+        return "flux"
+    dim = _context_dim(tensors, "attn2.to_k.weight")
+    if dim in (768, 2048):
+        return {768: "sd15", 2048: "sdxl"}[dim]
+    if _any(keys, "add_embedding") or _any(keys, "label_emb"):
+        return "sdxl"
+    return None
+
+
+CLASSIFIERS = {"model": classify_model, "lora": classify_lora, "controlnet": classify_controlnet}
+
 _cache = {}
 
 
@@ -154,6 +169,6 @@ def cached(kind, path):
     if hit and hit[0] == stamp:
         return hit[1]
     tensors, metadata = read_header(path)
-    result = (classify_model if kind == "model" else classify_lora)(path, tensors, metadata)
+    result = CLASSIFIERS[kind](path, tensors, metadata)
     _cache[(kind, path)] = (stamp, result)
     return result

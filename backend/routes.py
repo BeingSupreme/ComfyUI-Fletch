@@ -53,12 +53,17 @@ def register(routes):
             return web.json_response({"error": f"{name} not found in {folder}"}, status=404)
         return web.json_response(result)
 
-    @routes.get("/fletch/api/loras")
-    async def loras(request):
-        def scan():
-            return [{"name": n, "family": _classify("lora", "loras", n)} for n in folder_paths.get_filename_list("loras")]
+    def file_families(kind, folder):
+        async def handler(request):
+            def scan():
+                return [{"name": n, "family": _classify(kind, folder, n)} for n in folder_paths.get_filename_list(folder)]
 
-        return web.json_response(await asyncio.to_thread(scan))
+            return web.json_response(await asyncio.to_thread(scan))
+
+        return handler
+
+    routes.get("/fletch/api/loras")(file_families("lora", "loras"))
+    routes.get("/fletch/api/controlnets")(file_families("controlnet", "controlnet"))
 
     if os.path.isdir(os.path.join(DIST, "assets")):
         routes.static("/fletch/assets", os.path.join(DIST, "assets"))

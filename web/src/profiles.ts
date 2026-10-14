@@ -10,8 +10,11 @@ export type Family =
   | "flux_schnell"
   | "flux2_klein"
   | "flux2_klein_base"
-  | "krea2_turbo";
-export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2" | "krea2";
+  | "krea2_turbo"
+  | "wan22_t2v"
+  | "wan22_i2v"
+  | "wan22_5b";
+export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2" | "krea2" | "wan";
 export type Shape = "square" | "portrait" | "wide";
 export type Quality = "fast" | "balanced" | "best";
 
@@ -21,8 +24,9 @@ export interface Profile {
    * How the model is wired. "sd" and "flux1" sample with KSampler; "flux2" uses ComfyUI's
    * FLUX.2 graph (Flux2Scheduler + CFGGuider + SamplerCustomAdvanced) and a Qwen3 encoder.
    * "krea2" samples with KSampler, a Qwen3-VL encoder and the Qwen Image VAE.
+   * "wan22" is video: UMT5 encoder, Wan VAE, and (for 14B) a high-noise and a low-noise model.
    */
-  arch: "sd" | "flux1" | "flux2" | "krea2";
+  arch: "sd" | "flux1" | "flux2" | "krea2" | "wan22";
   /** Architecture its LoRAs are trained on. */
   loraBase: LoraBase;
   sizes: Record<Shape, [width: number, height: number]>;
@@ -39,11 +43,48 @@ export interface Profile {
   /** Tags the family expects, added in front of the user's prompts. */
   positivePrefix?: string;
   negativePrefix?: string;
-  /** Latent node for text-to-image. */
-  latent: "EmptyLatentImage" | "EmptySD3LatentImage" | "EmptyFlux2LatentImage";
+  /** Latent node for text-to-image (or text-to-video). */
+  latent: "EmptyLatentImage" | "EmptySD3LatentImage" | "EmptyFlux2LatentImage" | "EmptyHunyuanLatentVideo" | "Wan22ImageToVideoLatent";
+  /** Set for video models. */
+  video?: VideoProfile;
 }
 
+export interface VideoProfile {
+  fps: number;
+  /** Lengths offered, in seconds; the last is the longest the model handles well. */
+  seconds: number[];
+  /** ModelSamplingSD3 shift. */
+  shift: number;
+  /** Wan 2.2 14B: sample the first half with the high-noise model, the rest with the low-noise one. */
+  experts: boolean;
+  /** "required": animates a start picture; "optional": can start from one; "none": text only. */
+  image: "required" | "optional" | "none";
+  /** VAE file the model expects, matched by name. */
+  vae: RegExp;
+  vaeFile: string;
+}
+
+/** Wan's own default negative prompt (from ComfyUI's templates), in the language it was trained on. */
+export const WAN_NEGATIVE =
+  "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
 const SDXL_SIZES: Profile["sizes"] = { square: [1024, 1024], portrait: [832, 1216], wide: [1216, 832] };
+
+const WAN14: Profile = {
+  arch: "wan22",
+  label: "Wan 2.2 14B",
+  loraBase: "wan",
+  sizes: { square: [640, 640], portrait: [480, 832], wide: [832, 480] },
+  steps: { fast: 14, balanced: 20, best: 30 },
+  cfg: 3.5,
+  sampler: "euler",
+  scheduler: "simple",
+  clipSkip: 1,
+  negative: true,
+  negativePrefix: WAN_NEGATIVE,
+  latent: "EmptyHunyuanLatentVideo",
+  video: { fps: 16, seconds: [2, 3, 5], shift: 5, experts: true, image: "none", vae: /wan.?2\.?1.?vae/, vaeFile: "wan_2.1_vae.safetensors" },
+};
 
 export const PROFILES: Record<Family, Profile> = {
   sd15: {
@@ -171,6 +212,36 @@ export const PROFILES: Record<Family, Profile> = {
     negative: false,
     latent: "EmptyLatentImage",
   },
+  // Wan 2.2 follows ComfyUI's templates: 14B splits sampling between its two models at the
+  // halfway step with shift 5 and CFG 3.5 (the 4-step speed LoRAs, when present, make Fast
+  // 4 steps at CFG 1); 5B runs alone at shift 8, CFG 5, uni_pc.
+  wan22_t2v: {
+    ...WAN14,
+    label: "Wan 2.2 14B text to video",
+    latent: "EmptyHunyuanLatentVideo",
+    video: { ...WAN14.video!, image: "none" },
+  },
+  wan22_i2v: {
+    ...WAN14,
+    label: "Wan 2.2 14B image to video",
+    latent: "Wan22ImageToVideoLatent",
+    video: { ...WAN14.video!, image: "required" },
+  },
+  wan22_5b: {
+    arch: "wan22",
+    label: "Wan 2.2 5B",
+    loraBase: "wan",
+    sizes: { square: [960, 960], portrait: [704, 1280], wide: [1280, 704] },
+    steps: { fast: 14, balanced: 20, best: 30 },
+    cfg: 5,
+    sampler: "uni_pc",
+    scheduler: "simple",
+    clipSkip: 1,
+    negative: true,
+    negativePrefix: WAN_NEGATIVE,
+    latent: "Wan22ImageToVideoLatent",
+    video: { fps: 24, seconds: [2, 3, 5], shift: 8, experts: false, image: "optional", vae: /wan.?2\.?2.?vae/, vaeFile: "wan2.2_vae.safetensors" },
+  },
 };
 
 /** Families the detector recognises but Fletch can't run yet, in words. */
@@ -178,6 +249,7 @@ export const UNSUPPORTED: Record<string, string> = {
   sd2: "SD 2",
   sd3: "SD 3.5",
   flux2: "FLUX.2 dev",
+  wan21: "Wan 2.1",
   krea2_raw: "Krea 2 RAW (made for training LoRAs; use Krea 2 Turbo to make images)",
 };
 

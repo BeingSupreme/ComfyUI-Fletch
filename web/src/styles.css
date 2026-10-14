@@ -56,13 +56,13 @@ button:disabled { opacity: 0.5; cursor: default; }
   position: relative; display: grid; place-items: center; flex: 1 1 auto; min-height: 240px;
   border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden;
 }
-.preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.preview img, .preview video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .progress { position: absolute; left: 16px; right: 16px; bottom: 16px; }
 .bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 4px; }
 .bar div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.2s; }
 .error { color: var(--error); margin: 0; }
 .history { display: flex; gap: 12px; overflow-x: auto; flex: none; padding-bottom: 4px; }
-.history img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); }
+.history img, .history video { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); }
 @media (max-width: 720px) {
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; height: auto; }
   aside, main { overflow: visible; }
@@ -88,7 +88,7 @@ button.link { border: none; background: none; padding: 0; color: var(--accent); 
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .advanced { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .advanced button { grid-column: 1 / -1; justify-self: start; }
-.history img.on { border: 2px solid var(--accent); }
+.history img.on, .history video.on { border: 2px solid var(--accent); }
 
 select { max-width: 100%; text-overflow: ellipsis; }
 .generate { display: flex; align-items: center; gap: 12px; }

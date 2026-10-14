@@ -1,4 +1,4 @@
-"""The one node Fletch adds: save images to any folder, for output folders outside ComfyUI's."""
+"""Fletch's nodes: save images or videos to any folder, for output folders outside ComfyUI's."""
 
 import json
 import os
@@ -50,5 +50,44 @@ class FletchSaveImage:
         return {"ui": {"images": results}}
 
 
-NODE_CLASS_MAPPINGS = {"FletchSaveImage": FletchSaveImage}
-NODE_DISPLAY_NAME_MAPPINGS = {"FletchSaveImage": "Save Image (Fletch, any folder)"}
+class FletchSaveVideo:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO",),
+                "folder": ("STRING", {"default": ""}),
+                "filename_prefix": ("STRING", {"default": "fletch"}),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "Fletch"
+
+    def save(self, video, folder, filename_prefix="fletch", prompt=None, extra_pnginfo=None):
+        from comfy_api.latest import Types  # only inside ComfyUI
+
+        os.makedirs(folder, exist_ok=True)
+        pattern = re.compile(rf"^{re.escape(filename_prefix)}_(\d+)_\.mp4$")
+        index = max([int(m.group(1)) for n in os.listdir(folder) if (m := pattern.match(n))], default=0) + 1
+        name = f"{filename_prefix}_{index:05}_.mp4"
+        metadata = dict(extra_pnginfo or {})
+        if prompt is not None:
+            metadata["prompt"] = prompt
+        video.save_to(
+            os.path.join(folder, name),
+            format=Types.VideoContainer("mp4"),
+            codec=Types.VideoCodec("auto"),
+            metadata=metadata or None,
+        )
+        return {"ui": {"images": [{"filename": name, "subfolder": folder, "type": "fletch"}], "animated": (True,)}}
+
+
+NODE_CLASS_MAPPINGS = {"FletchSaveImage": FletchSaveImage, "FletchSaveVideo": FletchSaveVideo}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FletchSaveImage": "Save Image (Fletch, any folder)",
+    "FletchSaveVideo": "Save Video (Fletch, any folder)",
+}

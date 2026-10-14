@@ -5,6 +5,7 @@
 // say where it plugs in and everything downstream picks it up.
 
 import { PROFILES, type Family, type Quality, type Shape } from "./profiles";
+import { compileVideo } from "./video";
 
 export type Link = [nodeId: string, outputIndex: number];
 
@@ -122,6 +123,10 @@ export interface Settings {
   seed: number;
   advanced: Advanced;
   addons?: Addons;
+  /** Video models: length in seconds. */
+  seconds?: number;
+  /** Wan 2.2 14B speed LoRAs (lightx2v), used for Fast: 4 steps at CFG 1. */
+  speedLora?: { high: string; low: string };
 }
 
 /** Separate files a diffusion-only model needs (Flux ships without encoders or VAE). */
@@ -130,6 +135,11 @@ export interface Parts {
   clipL?: string;
   qwen?: string;
   vae?: string;
+  /** UMT5 text encoder (Wan). */
+  umt5?: string;
+  /** Wan 2.2 14B: the two halves of the model pair. */
+  high?: string;
+  low?: string;
 }
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
@@ -149,32 +159,74 @@ export function sizeFor(family: Family, shape: Shape, source?: { width: number; 
 }
 
 /** The numbers a run will actually use: profile defaults with Advanced overrides applied. */
-export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced" | "addons">) {
+export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced" | "addons" | "seconds" | "speedLora">) {
   const p = PROFILES[s.family];
   const [width, height] = sizeFor(s.family, s.shape, s.addons?.source?.image);
+  const speed = !!s.speedLora;
+  const v = p.video;
+  const seconds = v ? (s.seconds && v.seconds.includes(s.seconds) ? s.seconds : v.seconds[v.seconds.length - 1]) : 0;
   return {
     width,
     height,
-    steps: s.advanced.steps ?? p.steps[s.quality],
-    cfg: s.advanced.cfg ?? p.cfg,
+    steps: s.advanced.steps ?? (speed ? 4 : p.steps[s.quality]),
+    cfg: s.advanced.cfg ?? (speed ? 1 : p.cfg),
+    seconds,
+    frames: v ? seconds * v.fps + 1 : 1,
     sampler: s.advanced.sampler ?? p.sampler,
     scheduler: s.advanced.scheduler ?? p.scheduler,
     clipSkip: s.advanced.clipSkip ?? p.clipSkip,
   };
 }
 
-const withPrefix = (prefix: string | undefined, text: string) =>
+export const withPrefix = (prefix: string | undefined, text: string) =>
   prefix ? (text.trim() ? `${prefix}, ${text.trim()}` : prefix) : text.trim();
 
-const basename = (path: string) => (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+export const basename = (path: string) => (path.split(/[\\/]/).pop() ?? path).toLowerCase();
 
 const QWEN = { "4b": /qwen.?3.?4b/i, "9b": /qwen.?3.?8b/i } as Record<string, RegExp>;
 const QWEN_VL = /qwen.?3.?vl/i;
 const QWEN_FILE = { "4b": "qwen_3_4b.safetensors", "9b": "qwen_3_8b_fp8mixed.safetensors" } as Record<string, string>;
 
-/** Pick the text encoders and VAE a diffusion-only Flux model needs from what's on disk. */
-export function pickParts(family: Family, variant: string | null | undefined, textEncoders: string[], vaes: string[]): Parts {
-  const arch = PROFILES[family].arch;
+/** The other half of a Wan 2.2 14B pair: same file name with "high" and "low" swapped. */
+export function partnerName(name: string, from: "high" | "low"): string | null {
+  const cut = Math.max(name.lastIndexOf("/"), name.lastIndexOf("\\")) + 1;
+  const [dir, base] = [name.slice(0, cut), name.slice(cut)];
+  const to = from === "high" ? "low" : "high";
+  const swap = (word: string) => (word === word.toUpperCase() ? to.toUpperCase() : word[0] === word[0].toUpperCase() ? to[0].toUpperCase() + to.slice(1) : to);
+  const near = new RegExp(`${from}(?=[\\s_.-]*noise)`, "i");
+  const any = new RegExp(from, "i");
+  const re = near.test(base) ? near : any.test(base) ? any : null;
+  return re ? dir + base.replace(re, swap) : null;
+}
+
+/**
+ * Pick the separate files a diffusion-only model needs from what's on disk: text encoders and
+ * VAE, plus for Wan 2.2 14B the other model of its high/low-noise pair.
+ */
+export function pickParts(
+  family: Family,
+  variant: string | null | undefined,
+  textEncoders: string[],
+  vaes: string[],
+  model?: string,
+  diffusionModels: string[] = [],
+): Parts {
+  const p = PROFILES[family];
+  const arch = p.arch;
+  if (arch === "wan22") {
+    const umt5s = textEncoders.filter((n) => /umt5/i.test(n));
+    const parts: Parts = {
+      umt5: umt5s.find((n) => /fp8/i.test(n)) ?? umt5s[0],
+      vae: vaes.find((n) => p.video!.vae.test(basename(n))),
+    };
+    if (p.video!.experts && model) {
+      const isLow = /low/i.test(basename(model)) && !/high/i.test(basename(model));
+      const other = partnerName(model, isLow ? "low" : "high");
+      const found = other && diffusionModels.includes(other) ? other : undefined;
+      [parts.high, parts.low] = isLow ? [found, model] : [model, found];
+    }
+    return parts;
+  }
   if (arch === "krea2") {
     return {
       qwen: textEncoders.find((n) => QWEN_VL.test(basename(n))),
@@ -216,6 +268,18 @@ export function modelProblems(
   }
   if (arch === "sd") return ["This file has no text encoders or VAE. Use the full checkpoint for this model instead."];
   const problems: string[] = [];
+  if (arch === "wan22") {
+    const v = PROFILES[s.family].video!;
+    if (!parts.umt5) problems.push("Add the UMT5 text encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors) to models/text_encoders.");
+    if (!parts.vae) problems.push(`Add the Wan VAE (${v.vaeFile}) to models/vae.`);
+    if (v.experts && !(parts.high && parts.low)) {
+      const want = partnerName(s.model.name, parts.low === s.model.name ? "low" : "high");
+      problems.push(
+        `Wan 2.2 14B comes as two models, high noise and low noise. Put the other one${want ? ` (${want.split(/[\\/]/).pop()})` : ""} in models/diffusion_models too.`,
+      );
+    }
+    return problems;
+  }
   if (arch === "krea2") {
     if (!parts.qwen) problems.push("Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.");
     if (!parts.vae) problems.push("Add the Qwen Image VAE (qwen_image_vae.safetensors) to models/vae.");
@@ -233,7 +297,7 @@ export function modelProblems(
   return problems;
 }
 
-class Graph {
+export class Graph {
   nodes: ApiWorkflow = {};
   private next = 1;
   add(class_type: string, inputs: Record<string, unknown>): string {
@@ -243,12 +307,23 @@ class Graph {
   }
 }
 
-const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
+export const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
 
 /** Where to save: a folder inside ComfyUI's output (`subfolder`) or anywhere else (`folder`). */
 export interface Destination {
   subfolder?: string;
   folder?: string;
+}
+
+/** Everything stopping a run, the model's needs first, then the start picture for video. */
+export function runProblems(s: Pick<Settings, "model" | "family" | "variant" | "addons">, parts: Parts, hasTextEncoders?: boolean): string[] {
+  const problems = modelProblems(s, parts, hasTextEncoders);
+  const v = PROFILES[s.family].video;
+  if (v?.image === "required" && !s.addons?.source)
+    problems.push("This model turns a picture into a video. Turn on Start from an image and add one.");
+  if (v?.image === "none" && s.addons?.source)
+    problems.push("This model makes video from text only. Turn off Start from an image, or pick the image-to-video model.");
+  return problems;
 }
 
 export function compile(
@@ -258,8 +333,9 @@ export function compile(
   nodes: NodeInfos = {},
   dest: Destination = {},
 ): ApiWorkflow {
-  const problems = modelProblems(s, parts, hasTextEncoders);
+  const problems = runProblems(s, parts, hasTextEncoders);
   if (problems.length) throw new Error(problems.join(" "));
+  if (PROFILES[s.family].video) return compileVideo(s, parts, nodes, dest);
 
   const p = PROFILES[s.family];
   const r = resolve(s);

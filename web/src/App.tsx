@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
 import { HistoryBar } from "./HistoryBar";
+import { findSpeedLoras } from "./video";
 import { MaskPainter } from "./MaskPainter";
 import {
   connect,
@@ -24,7 +25,7 @@ import { FAMILIES, isFamily, PROFILES, UNSUPPORTED, type Family, type Quality, t
 import { load, save } from "./store";
 import {
   compile,
-  modelProblems,
+  runProblems,
   pickParts,
   randomSeed,
   resolve,
@@ -38,6 +39,8 @@ import {
 /** Fletch's own save node is only needed for folders outside ComfyUI's output. */
 const destination = (o: OutputFolder | null): Destination =>
   !o ? {} : o.inside_output ? { subfolder: o.subfolder || undefined } : { folder: o.path };
+
+const isVideo = (nameOrUrl: string) => /\.(mp4|webm|mkv|mov)(&|$)/i.test(nameOrUrl);
 
 type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
 
@@ -63,6 +66,8 @@ interface Choices {
   /** Fixed seed, or null for a new random seed every run. */
   seed: number | null;
   addons: AddonChoices;
+  /** Video length in seconds. */
+  seconds: number;
 }
 
 const DEFAULT_CHOICES: Choices = {
@@ -76,6 +81,7 @@ const DEFAULT_CHOICES: Choices = {
   advanced: {},
   seed: null,
   addons: DEFAULT_ADDONS,
+  seconds: 5,
 };
 
 /** Saved choices from an older version may lack newer fields; fill them from the defaults. */
@@ -104,7 +110,7 @@ const modelKey = (m: { folder: string; name: string }) => `${m.folder}:${m.name}
 const SHAPES: [Shape, string][] = [["square", "Square"], ["portrait", "Portrait"], ["wide", "Wide"]];
 const QUALITIES: [Quality, string][] = [["fast", "Fast"], ["balanced", "Balanced"], ["best", "Best"]];
 
-function Chips<T extends string>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
+function Chips<T extends string | number>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
   return (
     <div className="chips">
       {props.options.map(([v, label]) => (
@@ -199,18 +205,21 @@ export function App() {
   const current = detected?.key === key ? detected : null;
   const variant = current?.variant ?? null;
   const parts = useMemo(
-    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes) : {}),
-    [family, variant, catalog],
+    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes, choices.model?.name, catalog.diffusionModels) : {}),
+    [family, variant, catalog, choices.model?.name],
   );
-  const problems = choices.model && family ? modelProblems({ model: choices.model, family, variant }, parts, current?.hasTextEncoders) : [];
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
   const usableLoras = new Set([...compatibleLoras, ...unknownLoras].map((l) => l.name));
   const blocked = unavailable(profile, catalog, controlnets);
   const usableControlnets = new Set(profile ? controlnetsFor(profile, controlnets).map((c) => c.name) : []);
   const runAddons = addonsForRun(choices.addons, blocked, catalog, usableControlnets);
+  const problems =
+    choices.model && family ? runProblems({ model: choices.model, family, variant, addons: runAddons }, parts, current?.hasTextEncoders) : [];
+  const speedLora =
+    family && profile?.video?.experts && choices.quality === "fast" ? findSpeedLoras(family, loras.map((l) => l.name)) : undefined;
   const numbers = family
-    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons })
+    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons, seconds: choices.seconds, speedLora })
     : null;
 
   function settingsForRun(): Settings | null {
@@ -228,6 +237,7 @@ export function App() {
       seed: choices.seed ?? randomSeed(),
       advanced,
       addons: runAddons,
+      ...(profile?.video ? { seconds: numbers?.seconds, speedLora } : {}),
     };
   }
 
@@ -274,6 +284,7 @@ export function App() {
       loras: s.loras.length ? s.loras : c.loras,
       advanced: s.advanced,
       advancedFor: s.family,
+      seconds: s.seconds ?? c.seconds,
       seed: s.seed,
       addons: {
         source: { ...c.addons.source, on: !!s.addons?.source, ...s.addons?.source },
@@ -375,7 +386,9 @@ export function App() {
           )}
           {numbers && profile && (
             <p className="muted small">
-              Auto: {numbers.width} x {numbers.height}, {numbers.steps} steps, CFG {numbers.cfg}
+              Auto: {numbers.width} x {numbers.height}
+              {profile.video && `, ${numbers.seconds}s at ${profile.video.fps} fps`}, {numbers.steps} steps, CFG {numbers.cfg}
+              {speedLora && " (4-step speed LoRAs)"}
               {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
               {profile.positivePrefix && ", adds quality tags"}
             </p>
@@ -401,6 +414,17 @@ export function App() {
             <Chips options={SHAPES} value={choices.shape} onChange={(shape) => update({ shape })} />
           )}
         </section>
+
+        {profile?.video && numbers && (
+          <section>
+            <span className="label">Length</span>
+            <Chips
+              options={profile.video.seconds.map((n) => [n, `${n} sec`] as [number, string])}
+              value={numbers.seconds}
+              onChange={(seconds) => update({ seconds })}
+            />
+          </section>
+        )}
 
         <section>
           <span className="label">Quality</span>
@@ -472,7 +496,7 @@ export function App() {
             <label>
               <span className="label">Steps</span>
               <input
-                inputMode="numeric" placeholder={numbers ? String(profile!.steps[choices.quality]) : ""}
+                inputMode="numeric" placeholder={numbers ? String(speedLora ? 4 : profile!.steps[choices.quality]) : ""}
                 value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
               />
             </label>
@@ -545,7 +569,15 @@ export function App() {
         </div>
 
         <div className="preview">
-          {preview ? <img src={preview} alt="Latest result" /> : <span className="muted">Your image appears here</span>}
+          {preview ? (
+            isVideo(preview) ? (
+              <video src={preview} autoPlay loop muted controls playsInline />
+            ) : (
+              <img src={preview} alt="Latest result" />
+            )
+          ) : (
+            <span className="muted">Your {profile?.video ? "video" : "image"} appears here</span>
+          )}
           {running && (
             <div className="progress">
               <span className="small muted">Step {status.step} of {status.of}</span>
@@ -563,7 +595,9 @@ export function App() {
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
             <span className="actions">
-              <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              {!isVideo(selected.image.filename) && (
+                <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              )}
               <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
             </span>
           </div>
@@ -582,18 +616,18 @@ export function App() {
         />
         {history.length > 0 && (
           <div className="history">
-            {history.map((h) => (
-              <img
-                key={`${h.image.subfolder}/${h.image.filename}`}
-                src={imageUrl(h.image)}
-                alt=""
-                className={selected === h ? "on" : ""}
-                onClick={() => {
+            {history.map((h) => {
+              const props = {
+                key: `${h.image.subfolder}/${h.image.filename}`,
+                src: imageUrl(h.image),
+                className: selected === h ? "on" : "",
+                onClick: () => {
                   setPreview(imageUrl(h.image));
                   setSelected(h);
-                }}
-              />
-            ))}
+                },
+              };
+              return isVideo(h.image.filename) ? <video {...props} muted preload="metadata" /> : <img {...props} alt="" />;
+            })}
           </div>
         )}
       </main>

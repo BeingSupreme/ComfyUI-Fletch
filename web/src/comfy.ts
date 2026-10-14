@@ -66,6 +66,7 @@ const OPTIONAL_NODES = [
   "DepthAnythingV2Preprocessor",
   "DepthAnythingPreprocessor",
   "MiDaS-DepthMapPreprocessor",
+  "SaveVideo",
 ];
 
 async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {

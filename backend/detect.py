@@ -17,6 +17,7 @@ FAMILIES = (
     "sd15", "sd2", "sdxl", "pony", "illustrious", "sd3",
     "flux_dev", "flux_schnell", "flux2", "flux2_klein", "flux2_klein_base",
     "krea2_turbo", "krea2_raw",
+    "wan22_t2v", "wan22_i2v", "wan22_5b", "wan21",
 )
 
 # FLUX.2 text-input width = 3 x the text encoder's hidden size. FLUX.1 reads T5 at 4096.
@@ -82,6 +83,22 @@ def _flux(name, tensors):
     return ("flux_dev" if _any(keys, "guidance_in.") else "flux_schnell"), None
 
 
+def _wan(name, tensors):
+    """Wan video models. The patch embedding's shape gives size (width) and input channels:
+    5120 wide is 14B (16 channels = text to video, 36 = image to video), 3072 x 48 is the
+    Wan 2.2 5B. Wan 2.1 and 2.2 14B share a layout; 2.2 ships as high/low-noise pairs."""
+    shape = _shape(tensors, "patch_embedding.weight") or []
+    width, channels = (shape[0], shape[1]) if len(shape) >= 2 else (None, None)
+    base = os.path.basename(name).lower()
+    if _any(tensors.keys(), "vace_blocks."):
+        return "wan21"
+    if width == 3072 and channels == 48:
+        return "wan22_5b"
+    if width == 5120 and re.search(r"wan.?2\.?2|high.?noise|low.?noise", base):
+        return "wan22_i2v" if channels == 36 else "wan22_t2v"
+    return "wan21"
+
+
 def classify_model(name, tensors, metadata):
     """Classify a checkpoint or diffusion-model file.
 
@@ -95,7 +112,9 @@ def classify_model(name, tensors, metadata):
     )
 
     variant = None
-    if _any(keys, "txtfusion.projector.weight"):
+    if _any(keys, "patch_embedding.weight") and _any(keys, "cross_attn."):
+        family = _wan(name, tensors)
+    elif _any(keys, "txtfusion.projector.weight"):
         # Krea 2: RAW and Turbo share one layout, so only the filename tells them apart.
         family = "krea2_raw" if re.search(r"raw|base", os.path.basename(name).lower()) else "krea2_turbo"
     elif _any(keys, "double_blocks.") and _any(keys, "single_blocks."):
@@ -116,11 +135,13 @@ FLUX2_LINEAR1 = {27648, 36864}
 
 
 def classify_lora(name, tensors, metadata):
-    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2", "krea2" or None.
+    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2", "krea2", "wan" or None.
 
     Pony and Illustrious LoRAs come back as "sdxl" since they load on any SDXL model.
     """
     base = str(metadata.get("ss_base_model_version", "")).lower()
+    if "wan" in base:
+        return "wan"
     if "krea2" in base or "krea_2" in base or "krea-2" in base:
         return "krea2"
     if "flux2" in base or "flux.2" in base or "klein" in base:
@@ -133,6 +154,8 @@ def classify_lora(name, tensors, metadata):
         return "sd15"
 
     keys = tensors.keys()
+    if any(re.search(r"blocks[._]\d+[._](cross_attn|self_attn)[._]", k) for k in keys):
+        return "wan"
     # Krea 2 layer names: native (attn.wq, txtfusion) or diffusers (attn.to_gate, text_fusion).
     if any(re.search(r"txtfusion|text_fusion|attn[._](wq|to_gate)[._]", k) for k in keys):
         return "krea2"

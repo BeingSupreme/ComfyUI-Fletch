@@ -27,7 +27,7 @@ The built app ships in `dist/`, so there's nothing to build to use it.
 - **History** keeps your last 40 images. Click one, then "Use these settings" to get the exact same setup back, seed included. Every saved PNG also carries its Fletch settings in its metadata.
 - **Save to** (above the history) picks where images go: ComfyUI's output folder by default, a named folder inside it, or any folder on your PC (Browse opens your system's folder picker when ComfyUI's Python has it; otherwise paste the path). **Open folder** shows it in your file manager, and **Clear history** empties the list without deleting any images.
 
-### Video (Wan 2.2)
+### Video (Wan 2.2 and LTX-2.3)
 
 Pick a Wan 2.2 model and Fletch switches to video: a **Length** choice (2, 3 or 5 seconds) appears and the result plays in the preview and history.
 
@@ -35,6 +35,13 @@ Pick a Wan 2.2 model and Fletch switches to video: a **Length** choice (2, 3 or 
 - **Fast** uses the lightx2v 4-step LoRAs (`wan2.2_t2v_lightx2v_4steps_lora_..._high_noise` / `_low_noise`, or the `i2v` ones) if they're in `models/loras`: 4 steps at CFG 1 instead of 14. Balanced and Best run 20 and 30 steps at CFG 3.5.
 - **Wan 2.2 5B** (`wan2.2_ti2v_5B_fp16.safetensors`) is one file at 24 fps and 720p, with an optional start picture.
 - Both need `umt5_xxl_fp8_e4m3fn_scaled.safetensors` in `models/text_encoders`; 14B uses `wan_2.1_vae.safetensors` and 5B uses `wan2.2_vae.safetensors` in `models/vae`.
+- **LTX-2.3** makes video with sound, at 25 fps. It loads as a checkpoint and needs four files, the same ones ComfyUI's LTX-2.3 template uses:
+  - `ltx-2.3-22b-dev-fp8.safetensors` in `models/checkpoints` ([Lightricks/LTX-2.3-fp8](https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors))
+  - `gemma_3_12B_it_fp4_mixed.safetensors` in `models/text_encoders` ([Comfy-Org/ltx-2](https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors))
+  - `ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors` in `models/loras` ([Comfy-Org/ltx-2.3](https://huggingface.co/Comfy-Org/ltx-2.3/resolve/main/split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors))
+  - `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` in `models/latent_upscale_models` ([Lightricks/LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors))
+
+  It runs the template's fixed schedule (8 steps at half size, then 3 more after a 2x upscale), so the Quality choice is hidden. A start picture from **Start from an image** becomes the first frame.
 - Wan LoRAs work. One whose name says high noise or low noise goes on that half only; others go on both.
 - The image add-ons (hires fix, face fix, guide, upscale) are off for video for now.
 

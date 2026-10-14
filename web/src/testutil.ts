@@ -63,6 +63,21 @@ export const OUTPUTS: Record<string, number> = {
   CreateVideo: 1,
   SaveVideo: 1,
   FletchSaveVideo: 0,
+  LTXVAudioVAELoader: 1,
+  LTXAVTextEncoderLoader: 1,
+  LTXVConditioning: 2,
+  LTXVPreprocess: 1,
+  LTXVImgToVideoInplace: 1,
+  ManualSigmas: 1,
+  EmptyLTXVLatentVideo: 1,
+  LTXVEmptyLatentAudio: 1,
+  LTXVConcatAVLatent: 1,
+  LTXVSeparateAVLatent: 2,
+  LatentUpscaleModelLoader: 1,
+  LTXVLatentUpsampler: 1,
+  LTXVCropGuides: 3,
+  VAEDecodeTiled: 1,
+  LTXVAudioVAEDecode: 1,
 };
 
 export const isLink = (v: unknown): v is Link =>

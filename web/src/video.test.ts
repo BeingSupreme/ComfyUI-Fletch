@@ -129,3 +129,57 @@ describe("speed LoRAs", () => {
     expect(findSpeedLoras("wan22_i2v", names.slice(0, 3))).toBeUndefined();
   });
 });
+
+describe("LTX-2.3", () => {
+  const CKPT = "ltx-2.3-22b-dev-fp8.safetensors";
+  const ltx: Settings = { ...base, model: { folder: "checkpoints", name: CKPT }, family: "ltx23", shape: "wide", negative: "" };
+  const ltxParts = {
+    gemma: "gemma_3_12B_it_fp4_mixed.safetensors",
+    distillLora: "ltx-2.3-22b-distilled-lora-384.safetensors",
+    upscaler: "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+  };
+
+  it("builds the two-pass video and sound graph from ComfyUI's template", () => {
+    const wf = compile({ ...ltx, loras: [{ name: "style.safetensors", weight: 0.8 }] }, ltxParts);
+    expectWellFormed(wf);
+    expect(one(wf, "EmptyLTXVLatentVideo")[1].inputs).toEqual({ width: 640, height: 360, length: 126, batch_size: 1 });
+    expect(one(wf, "LTXVEmptyLatentAudio")[1].inputs).toMatchObject({ frames_number: 126, frame_rate: 25 });
+    expect(one(wf, "LTXAVTextEncoderLoader")[1].inputs).toEqual({ text_encoder: ltxParts.gemma, ckpt_name: CKPT, device: "default" });
+    expect(byType(wf, "ManualSigmas").map(([, n]) => n.inputs.sigmas)).toEqual([
+      "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0",
+      "0.85, 0.7250, 0.4219, 0.0",
+    ]);
+    const guiders = byType(wf, "CFGGuider").map(([, n]) => n.inputs);
+    expect(guiders.map((g) => g.cfg)).toEqual([1, 1]);
+    expect(follow(wf, guiders[1].positive).class_type).toBe("LTXVCropGuides");
+    const lora = follow(wf, guiders[0].model);
+    expect(lora.inputs.lora_name).toBe("style.safetensors");
+    expect(follow(wf, lora.inputs.model).inputs).toMatchObject({ lora_name: ltxParts.distillLora, strength_model: 0.5 });
+    expect(one(wf, "LatentUpscaleModelLoader")[1].inputs.model_name).toBe(ltxParts.upscaler);
+    expect(byType(wf, "RandomNoise").map(([, n]) => n.inputs.noise_seed)).toEqual([42, 43]);
+    const video = one(wf, "CreateVideo")[1].inputs;
+    expect(follow(wf, video.audio).class_type).toBe("LTXVAudioVAEDecode");
+    expect(follow(wf, video.images).class_type).toBe("VAEDecodeTiled");
+    expect(video.fps).toBe(25);
+    expect(byType(wf, "LTXVImgToVideoInplace")).toHaveLength(0);
+  });
+
+  it("presses a start picture into both passes", () => {
+    const wf = compile({ ...ltx, addons: { source: { image: start, strength: 1 } } }, ltxParts);
+    expectWellFormed(wf);
+    expect(byType(wf, "LTXVImgToVideoInplace").map(([, n]) => n.inputs.strength)).toEqual([0.7, 1]);
+    expect(one(wf, "ImageScale")[1].inputs).toMatchObject({ width: 960, height: 960 });
+  });
+
+  it("finds its files and says which are missing", () => {
+    const parts = pickParts("ltx23", null, ["gemma_3_12B_it_fp4_mixed.safetensors", "t5xxl.safetensors"], [], CKPT, [], {
+      loras: ["detail.safetensors", ltxParts.distillLora],
+      latentUpscalers: ["ltx-2-spatial-upscaler-x2-1.0.safetensors", ltxParts.upscaler],
+    });
+    expect(parts).toEqual(ltxParts);
+    const problems = runProblems({ ...ltx, model: { folder: "diffusion_models", name: CKPT } }, {});
+    expect(problems).toHaveLength(4);
+    expect(problems[0]).toMatch(/models\/checkpoints/);
+    expect(runProblems(ltx, ltxParts)).toEqual([]);
+  });
+});

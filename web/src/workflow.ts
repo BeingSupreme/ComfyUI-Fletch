@@ -140,6 +140,16 @@ export interface Parts {
   /** Wan 2.2 14B: the two halves of the model pair. */
   high?: string;
   low?: string;
+  /** LTX-2.3: Gemma 3 text encoder, distilled LoRA and 2x latent upscaler. */
+  gemma?: string;
+  distillLora?: string;
+  upscaler?: string;
+}
+
+/** Files beyond text encoders and VAEs that some families need. */
+export interface ExtraFiles {
+  loras?: string[];
+  latentUpscalers?: string[];
 }
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
@@ -210,14 +220,25 @@ export function pickParts(
   vaes: string[],
   model?: string,
   diffusionModels: string[] = [],
+  extra: ExtraFiles = {},
 ): Parts {
   const p = PROFILES[family];
   const arch = p.arch;
+  if (arch === "ltx23") {
+    const gemmas = textEncoders.filter((n) => /gemma.?3/i.test(basename(n)));
+    const distills = (extra.loras ?? []).filter((n) => /ltx.?2.?3/.test(basename(n)) && /distill/.test(basename(n)));
+    const ups = extra.latentUpscalers ?? [];
+    return {
+      gemma: gemmas.find((n) => /12b/i.test(n)) ?? gemmas[0],
+      distillLora: distills[0],
+      upscaler: ups.find((n) => /ltx.?2.?3/.test(basename(n)) && /spatial|upscal/.test(basename(n))) ?? ups.find((n) => /ltx/.test(basename(n))),
+    };
+  }
   if (arch === "wan22") {
     const umt5s = textEncoders.filter((n) => /umt5/i.test(n));
     const parts: Parts = {
       umt5: umt5s.find((n) => /fp8/i.test(n)) ?? umt5s[0],
-      vae: vaes.find((n) => p.video!.vae.test(basename(n))),
+      vae: vaes.find((n) => p.video!.vae!.test(basename(n))),
     };
     if (p.video!.experts && model) {
       const isLow = /low/i.test(basename(model)) && !/high/i.test(basename(model));
@@ -260,6 +281,15 @@ export function modelProblems(
   hasTextEncoders?: boolean,
 ): string[] {
   const arch = PROFILES[s.family].arch;
+  if (arch === "ltx23") {
+    const problems: string[] = [];
+    if (s.model.folder !== "checkpoints") problems.push("LTX-2.3 loads as a full checkpoint. Put it in models/checkpoints and pick it there.");
+    if (!parts.gemma) problems.push("Add the Gemma 3 text encoder (gemma_3_12B_it_fp4_mixed.safetensors) to models/text_encoders.");
+    if (!parts.distillLora)
+      problems.push("Add LTX-2.3's distilled LoRA (ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors) to models/loras.");
+    if (!parts.upscaler) problems.push("Add LTX-2.3's upscaler (ltx-2.3-spatial-upscaler-x2-1.1.safetensors) to models/latent_upscale_models.");
+    return problems;
+  }
   if (s.model.folder === "checkpoints") {
     if (hasTextEncoders !== false || arch === "sd") return [];
     return [

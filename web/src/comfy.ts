@@ -51,6 +51,8 @@ export interface Catalog {
   samplers: string[];
   schedulers: string[];
   upscaleModels: string[];
+  /** LTX latent upscalers (models/latent_upscale_models). */
+  latentUpscalers: string[];
   /** Detection models for face fix (Impact Subpack's UltralyticsDetectorProvider). */
   detectors: string[];
   /** /object_info for the custom nodes add-ons use; missing means not installed. */
@@ -67,6 +69,7 @@ const OPTIONAL_NODES = [
   "DepthAnythingPreprocessor",
   "MiDaS-DepthMapPreprocessor",
   "SaveVideo",
+  "CreateVideo",
 ];
 
 async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {
@@ -78,7 +81,7 @@ async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {
 }
 
 export async function loadCatalog(): Promise<Catalog> {
-  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, infos] =
+  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, latentUpscalers, infos] =
     await Promise.all([
       listOptions("CheckpointLoaderSimple", "ckpt_name"),
       listOptions("UNETLoader", "unet_name"),
@@ -88,10 +91,11 @@ export async function loadCatalog(): Promise<Catalog> {
       listOptions("KSampler", "scheduler"),
       listOptions("UpscaleModelLoader", "model_name"),
       listOptions("UltralyticsDetectorProvider", "model_name"),
+      listOptions("LatentUpscaleModelLoader", "model_name"),
       Promise.all(OPTIONAL_NODES.map(nodeInfo)),
     ]);
   const nodes = Object.fromEntries(OPTIONAL_NODES.map((n, i) => [n, infos[i]]));
-  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, nodes };
+  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, latentUpscalers, nodes };
 }
 
 /** Upload a picture to ComfyUI's input folder (under fletch/) so LoadImage can read it. */

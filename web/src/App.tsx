@@ -98,6 +98,7 @@ const EMPTY_CATALOG: Catalog = {
   diffusionModels: [],
   textEncoders: [],
   vaes: [],
+  latentUpscalers: [],
   samplers: [],
   schedulers: [],
   upscaleModels: [],
@@ -205,8 +206,14 @@ export function App() {
   const current = detected?.key === key ? detected : null;
   const variant = current?.variant ?? null;
   const parts = useMemo(
-    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes, choices.model?.name, catalog.diffusionModels) : {}),
-    [family, variant, catalog, choices.model?.name],
+    () =>
+      family
+        ? pickParts(family, variant, catalog.textEncoders, catalog.vaes, choices.model?.name, catalog.diffusionModels, {
+            loras: loras.map((l) => l.name),
+            latentUpscalers: catalog.latentUpscalers,
+          })
+        : {},
+    [family, variant, catalog, choices.model?.name, loras],
   );
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
@@ -426,10 +433,12 @@ export function App() {
           </section>
         )}
 
-        <section>
-          <span className="label">Quality</span>
-          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
-        </section>
+        {!profile?.fixedSchedule && (
+          <section>
+            <span className="label">Quality</span>
+            <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
+          </section>
+        )}
 
         <section>
           <span className="label">Add-ons</span>
@@ -493,49 +502,53 @@ export function App() {
         <details>
           <summary>Advanced</summary>
           <div className="advanced">
-            <label>
-              <span className="label">Steps</span>
-              <input
-                inputMode="numeric" placeholder={numbers ? String(speedLora ? 4 : profile!.steps[choices.quality]) : ""}
-                value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">CFG</span>
-              <input
-                inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
-                value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">Sampler</span>
-              <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
-                <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
-                {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Scheduler</span>
-              <select
-                value={advanced.scheduler ?? ""}
-                disabled={profile?.arch === "flux2"}
-                onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
-              >
-                <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
-                {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Clip skip</span>
-              <select
-                value={advanced.clipSkip ?? ""}
-                onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
-              >
-                <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
-                <option value="1">1</option>
-                <option value="2">2</option>
-              </select>
-            </label>
+            {!profile?.fixedSchedule && (
+              <>
+                <label>
+                  <span className="label">Steps</span>
+                  <input
+                    inputMode="numeric" placeholder={numbers ? String(speedLora ? 4 : profile!.steps[choices.quality]) : ""}
+                    value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">CFG</span>
+                  <input
+                    inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
+                    value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">Sampler</span>
+                  <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
+                    <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
+                    {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Scheduler</span>
+                  <select
+                    value={advanced.scheduler ?? ""}
+                    disabled={profile?.arch === "flux2"}
+                    onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
+                  >
+                    <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
+                    {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Clip skip</span>
+                  <select
+                    value={advanced.clipSkip ?? ""}
+                    onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
+                  >
+                    <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                  </select>
+                </label>
+              </>
+            )}
             <label>
               <span className="label">Seed</span>
               <input

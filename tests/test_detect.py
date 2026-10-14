@@ -231,3 +231,22 @@ def test_lora_wan(tmp_path):
     assert lora(tmp_path, "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", keys) == "wan"
     kohya = {"lora_unet_blocks_0_self_attn_q.lora_down.weight": [64, 5120]}
     assert lora(tmp_path, "wan_style.safetensors", kohya) == "wan"
+
+
+LTX_AV = {
+    "model.diffusion_model.adaln_single.emb.timestep_embedder.linear_1.bias": [4096],
+    "model.diffusion_model.audio_adaln_single.linear.weight": [12288, 2048],
+    "model.diffusion_model.transformer_blocks.0.attn2.to_k.weight": [4096, 4096],
+    "vae.decoder.conv_in.weight": [1],
+}
+
+
+def test_ltx_versions(tmp_path):
+    assert model(tmp_path, "ltx-2.3-22b-dev-fp8.safetensors", LTX_AV)["family"] == "ltx23"
+    assert model(tmp_path, "ltx-2-19b-dev-fp8.safetensors", LTX_AV)["family"] == "ltx2"
+    old = {k: v for k, v in LTX_AV.items() if "audio" not in k}
+    assert model(tmp_path, "ltxv-13b-0.9.8-dev.safetensors", old)["family"] == "ltxv"
+
+
+def test_lora_ltx_by_name(tmp_path):
+    assert lora(tmp_path, "ltx_2.3_22b_distilled_1.1_lora.safetensors", {"x.lora_A.weight": [1, 1]}) == "ltx"

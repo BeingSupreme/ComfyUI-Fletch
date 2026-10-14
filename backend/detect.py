@@ -18,6 +18,7 @@ FAMILIES = (
     "flux_dev", "flux_schnell", "flux2", "flux2_klein", "flux2_klein_base",
     "krea2_turbo", "krea2_raw",
     "wan22_t2v", "wan22_i2v", "wan22_5b", "wan21",
+    "ltx23", "ltx2", "ltxv",
 )
 
 # FLUX.2 text-input width = 3 x the text encoder's hidden size. FLUX.1 reads T5 at 4096.
@@ -112,7 +113,14 @@ def classify_model(name, tensors, metadata):
     )
 
     variant = None
-    if _any(keys, "patch_embedding.weight") and _any(keys, "cross_attn."):
+    if _any(keys, "adaln_single.emb.timestep_embedder.linear_1.bias"):
+        # Lightricks LTX. The audio+video ones (LTX-2 family) carry an audio timestep head;
+        # 2.0 and 2.3 share it, so the version comes from the filename.
+        if not _any(keys, "audio_adaln_single."):
+            family = "ltxv"
+        else:
+            family = "ltx23" if re.search(r"2[._-]?3", os.path.basename(name)) else "ltx2"
+    elif _any(keys, "patch_embedding.weight") and _any(keys, "cross_attn."):
         family = _wan(name, tensors)
     elif _any(keys, "txtfusion.projector.weight"):
         # Krea 2: RAW and Turbo share one layout, so only the filename tells them apart.
@@ -135,13 +143,15 @@ FLUX2_LINEAR1 = {27648, 36864}
 
 
 def classify_lora(name, tensors, metadata):
-    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2", "krea2", "wan" or None.
+    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2", "krea2", "wan", "ltx" or None.
 
     Pony and Illustrious LoRAs come back as "sdxl" since they load on any SDXL model.
     """
     base = str(metadata.get("ss_base_model_version", "")).lower()
     if "wan" in base:
         return "wan"
+    if "ltx" in base:
+        return "ltx"
     if "krea2" in base or "krea_2" in base or "krea-2" in base:
         return "krea2"
     if "flux2" in base or "flux.2" in base or "klein" in base:
@@ -156,6 +166,8 @@ def classify_lora(name, tensors, metadata):
     keys = tensors.keys()
     if any(re.search(r"blocks[._]\d+[._](cross_attn|self_attn)[._]", k) for k in keys):
         return "wan"
+    if any(re.search(r"audio_attn|audio_ff|video_to_audio|audio_to_video", k) for k in keys) or "ltx" in os.path.basename(name).lower():
+        return "ltx"
     # Krea 2 layer names: native (attn.wq, txtfusion) or diffusers (attn.to_gate, text_fusion).
     if any(re.search(r"txtfusion|text_fusion|attn[._](wq|to_gate)[._]", k) for k in keys):
         return "krea2"

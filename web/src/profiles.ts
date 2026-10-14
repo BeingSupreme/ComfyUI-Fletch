@@ -13,8 +13,9 @@ export type Family =
   | "krea2_turbo"
   | "wan22_t2v"
   | "wan22_i2v"
-  | "wan22_5b";
-export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2" | "krea2" | "wan";
+  | "wan22_5b"
+  | "ltx23";
+export type LoraBase = "sd15" | "sdxl" | "flux" | "flux2" | "krea2" | "wan" | "ltx";
 export type Shape = "square" | "portrait" | "wide";
 export type Quality = "fast" | "balanced" | "best";
 
@@ -25,8 +26,9 @@ export interface Profile {
    * FLUX.2 graph (Flux2Scheduler + CFGGuider + SamplerCustomAdvanced) and a Qwen3 encoder.
    * "krea2" samples with KSampler, a Qwen3-VL encoder and the Qwen Image VAE.
    * "wan22" is video: UMT5 encoder, Wan VAE, and (for 14B) a high-noise and a low-noise model.
+   * "ltx23" is video with sound: LTX-2.3's two-pass graph (half size, then upscaled and refined).
    */
-  arch: "sd" | "flux1" | "flux2" | "krea2" | "wan22";
+  arch: "sd" | "flux1" | "flux2" | "krea2" | "wan22" | "ltx23";
   /** Architecture its LoRAs are trained on. */
   loraBase: LoraBase;
   sizes: Record<Shape, [width: number, height: number]>;
@@ -44,9 +46,17 @@ export interface Profile {
   positivePrefix?: string;
   negativePrefix?: string;
   /** Latent node for text-to-image (or text-to-video). */
-  latent: "EmptyLatentImage" | "EmptySD3LatentImage" | "EmptyFlux2LatentImage" | "EmptyHunyuanLatentVideo" | "Wan22ImageToVideoLatent";
+  latent:
+    | "EmptyLatentImage"
+    | "EmptySD3LatentImage"
+    | "EmptyFlux2LatentImage"
+    | "EmptyHunyuanLatentVideo"
+    | "Wan22ImageToVideoLatent"
+    | "EmptyLTXVLatentVideo";
   /** Set for video models. */
   video?: VideoProfile;
+  /** The model runs a fixed schedule (LTX-2.3's distilled sigmas), so Quality and step settings don't apply. */
+  fixedSchedule?: boolean;
 }
 
 export interface VideoProfile {
@@ -59,9 +69,11 @@ export interface VideoProfile {
   experts: boolean;
   /** "required": animates a start picture; "optional": can start from one; "none": text only. */
   image: "required" | "optional" | "none";
-  /** VAE file the model expects, matched by name. */
-  vae: RegExp;
-  vaeFile: string;
+  /** VAE file the model expects, matched by name (LTX's VAE is inside its checkpoint). */
+  vae?: RegExp;
+  vaeFile?: string;
+  /** The model makes a soundtrack along with the video. */
+  audio?: boolean;
 }
 
 /** Wan's own default negative prompt (from ComfyUI's templates), in the language it was trained on. */
@@ -242,6 +254,25 @@ export const PROFILES: Record<Family, Profile> = {
     latent: "Wan22ImageToVideoLatent",
     video: { fps: 24, seconds: [2, 3, 5], shift: 8, experts: false, image: "optional", vae: /wan.?2\.?2.?vae/, vaeFile: "wan2.2_vae.safetensors" },
   },
+  // LTX-2.3 follows ComfyUI's template: the 22B dev checkpoint with its distilled LoRA at 0.5,
+  // 8 steps at half size, a 2x latent upscale, then 3 refining steps, all at CFG 1, 25 fps,
+  // with sound generated alongside.
+  ltx23: {
+    arch: "ltx23",
+    label: "LTX-2.3",
+    loraBase: "ltx",
+    sizes: { square: [960, 960], portrait: [720, 1280], wide: [1280, 720] },
+    steps: { fast: 11, balanced: 11, best: 11 },
+    cfg: 1,
+    sampler: "euler",
+    scheduler: "simple",
+    clipSkip: 1,
+    negative: true,
+    negativePrefix: "pc game, console game, video game, cartoon, childish, ugly",
+    latent: "EmptyLTXVLatentVideo",
+    fixedSchedule: true,
+    video: { fps: 25, seconds: [2, 3, 5], shift: 0, experts: false, image: "optional", audio: true },
+  },
 };
 
 /** Families the detector recognises but Fletch can't run yet, in words. */
@@ -250,6 +281,8 @@ export const UNSUPPORTED: Record<string, string> = {
   sd3: "SD 3.5",
   flux2: "FLUX.2 dev",
   wan21: "Wan 2.1",
+  ltx2: "LTX-2 (Fletch supports LTX-2.3)",
+  ltxv: "LTX-Video 0.9",
   krea2_raw: "Krea 2 RAW (made for training LoRAs; use Krea 2 Turbo to make images)",
 };
 

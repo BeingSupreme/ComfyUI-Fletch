@@ -49,6 +49,7 @@ FLUX_DEV_UNET = {
 def test_sd15_checkpoint(tmp_path):
     assert model(tmp_path, "dreamshaper_8.safetensors", SD15) == {
         "family": "sd15",
+        "variant": None,
         "has_vae": True,
         "has_text_encoders": True,
     }
@@ -80,6 +81,7 @@ def test_illustrious_by_filename(tmp_path):
 def test_flux_dev_diffusion_model_has_no_encoders(tmp_path):
     assert model(tmp_path, "flux1-dev.safetensors", FLUX_DEV_UNET) == {
         "family": "flux_dev",
+        "variant": None,
         "has_vae": False,
         "has_text_encoders": False,
     }
@@ -95,7 +97,7 @@ def test_flux_all_in_one_checkpoint(tmp_path):
     t["vae.decoder.conv_in.weight"] = [512, 16, 3, 3]
     t["text_encoders.clip_l.transformer.text_model.final_layer_norm.weight"] = [768]
     r = model(tmp_path, "flux1-dev-fp8.safetensors", t)
-    assert r == {"family": "flux_dev", "has_vae": True, "has_text_encoders": True}
+    assert r == {"family": "flux_dev", "variant": None, "has_vae": True, "has_text_encoders": True}
 
 
 def test_sd3(tmp_path):
@@ -125,3 +127,48 @@ def test_lora_by_shape(tmp_path):
 def test_lora_flux_and_sdxl_text_encoder_keys(tmp_path):
     assert lora(tmp_path, "g.safetensors", {"lora_unet_double_blocks_0_img_attn_proj.lora_down.weight": [16, 3072]}) == "flux"
     assert lora(tmp_path, "h.safetensors", {"lora_te2_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": [8, 1280]}) == "sdxl"
+
+
+KLEIN_4B = {
+    "double_blocks.0.img_attn.qkv.weight": [9216, 3072],
+    "single_blocks.0.linear1.weight": [27648, 3072],
+    "double_stream_modulation_img.lin.weight": [18432, 3072],
+    "txt_in.weight": [3072, 7680],
+}
+
+
+def test_flux2_klein_4b_distilled(tmp_path):
+    assert model(tmp_path, "flux-2-klein-4b-fp8.safetensors", KLEIN_4B) == {
+        "family": "flux2_klein",
+        "variant": "4b",
+        "has_vae": False,
+        "has_text_encoders": False,
+    }
+
+
+def test_flux2_klein_9b_base_by_text_width(tmp_path):
+    t = {
+        "double_blocks.0.img_attn.qkv.weight": [12288, 4096],
+        "single_blocks.0.linear1.weight": [36864, 4096],
+        "txt_in.weight": [4096, 12288],
+    }
+    r = model(tmp_path, "flux-2-klein-base-9b-fp8.safetensors", t)
+    assert (r["family"], r["variant"]) == ("flux2_klein_base", "9b")
+
+
+def test_flux1_is_not_mistaken_for_flux2(tmp_path):
+    t = dict(FLUX_DEV_UNET, **{"txt_in.weight": [3072, 4096]})
+    assert model(tmp_path, "flux1-dev-2.safetensors", t)["family"] == "flux_dev"
+
+
+def test_flux2_dev_is_recognised_but_unsupported(tmp_path):
+    t = {"double_blocks.0.a": [1], "single_blocks.0.a": [1], "txt_in.weight": [6144, 15360]}
+    assert model(tmp_path, "flux2-dev.safetensors", t)["family"] == "flux2"
+
+
+def test_lora_flux1_vs_flux2_by_linear1(tmp_path):
+    f1 = {"lora_unet_single_blocks_0_linear1.lora_up.weight": [21504, 16]}
+    f2 = {"single_blocks.0.linear1.lora_B.weight": [27648, 16]}
+    assert lora(tmp_path, "i.safetensors", f1) == "flux"
+    assert lora(tmp_path, "j.safetensors", f2) == "flux2"
+    assert lora(tmp_path, "k.safetensors", {}, {"ss_base_model_version": "flux2_klein_9b"}) == "flux2"

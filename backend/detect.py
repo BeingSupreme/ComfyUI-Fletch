@@ -11,9 +11,15 @@ import struct
 
 MAX_HEADER = 100 * 1024 * 1024
 
-# Families Fletch has profiles for. "sd2" and "sd3" are recognised so the UI can say they
-# aren't supported yet rather than guessing wrong.
-FAMILIES = ("sd15", "sd2", "sdxl", "pony", "illustrious", "sd3", "flux_dev", "flux_schnell")
+# Families Fletch has profiles for. "sd2", "sd3" and "flux2" (FLUX.2 dev) are recognised so
+# the UI can say they aren't supported yet rather than guessing wrong.
+FAMILIES = (
+    "sd15", "sd2", "sdxl", "pony", "illustrious", "sd3",
+    "flux_dev", "flux_schnell", "flux2", "flux2_klein", "flux2_klein_base",
+)
+
+# FLUX.2 text-input width = 3 x the text encoder's hidden size. FLUX.1 reads T5 at 4096.
+FLUX2_TEXT_WIDTHS = {7680: "4b", 12288: "9b"}  # Qwen3 4B, Qwen3 8B (Klein)
 
 
 def read_header(path):
@@ -54,10 +60,32 @@ def _context_dim(tensors, pattern):
     return None
 
 
+def _shape(tensors, suffix):
+    for key, shape in tensors.items():
+        if key.endswith(suffix):
+            return shape
+    return None
+
+
+def _flux(name, tensors):
+    """FLUX.1 dev / schnell, or FLUX.2 Klein (4B or 9B, distilled or base)."""
+    keys = tensors.keys()
+    txt = _shape(tensors, "txt_in.weight")
+    width = txt[1] if txt and len(txt) == 2 else None
+    if _any(keys, "double_stream_modulation_img") or (width is not None and width != 4096):
+        variant = FLUX2_TEXT_WIDTHS.get(width)
+        if variant is None:
+            return "flux2", None
+        base = "base" in os.path.basename(name).lower()
+        return ("flux2_klein_base" if base else "flux2_klein"), variant
+    return ("flux_dev" if _any(keys, "guidance_in.") else "flux_schnell"), None
+
+
 def classify_model(name, tensors, metadata):
     """Classify a checkpoint or diffusion-model file.
 
-    Returns {"family", "has_vae", "has_text_encoders"}; family is None when unknown.
+    Returns {"family", "variant", "has_vae", "has_text_encoders"}; family is None when unknown.
+    variant is "4b" or "9b" for FLUX.2 Klein, which picks its text encoder.
     """
     keys = tensors.keys()
     has_vae = _any(keys, "first_stage_model.") or _any(keys, "vae.")
@@ -65,8 +93,9 @@ def classify_model(name, tensors, metadata):
         _any(keys, "cond_stage_model.") or _any(keys, "conditioner.embedders") or _any(keys, "text_encoders.")
     )
 
+    variant = None
     if _any(keys, "double_blocks.") and _any(keys, "single_blocks."):
-        family = "flux_dev" if _any(keys, "guidance_in.") else "flux_schnell"
+        family, variant = _flux(name, tensors)
     elif _any(keys, "joint_blocks."):
         family = "sd3"
     elif _any(keys, "conditioner.embedders.1") or _any(keys, "label_emb.0.0.weight"):
@@ -74,15 +103,22 @@ def classify_model(name, tensors, metadata):
     else:
         dim = _context_dim(tensors, "attn2.to_k.weight")
         family = {768: "sd15", 1024: "sd2", 2048: _sdxl_flavour(name, metadata)}.get(dim)
-    return {"family": family, "has_vae": has_vae, "has_text_encoders": has_te}
+    return {"family": family, "variant": variant, "has_vae": has_vae, "has_text_encoders": has_te}
+
+
+# Out-features of a single block's fused linear1: 7 x width for FLUX.1, 9 x width for FLUX.2.
+FLUX1_LINEAR1 = {21504}
+FLUX2_LINEAR1 = {27648, 36864}
 
 
 def classify_lora(name, tensors, metadata):
-    """Return the base architecture a LoRA was trained for: "sd15", "sdxl", "flux" or None.
+    """Return the base a LoRA was trained for: "sd15", "sdxl", "flux", "flux2" or None.
 
     Pony and Illustrious LoRAs come back as "sdxl" since they load on any SDXL model.
     """
     base = str(metadata.get("ss_base_model_version", "")).lower()
+    if "flux2" in base or "flux.2" in base or "klein" in base:
+        return "flux2"
     if "flux" in base:
         return "flux"
     if "sdxl" in base or "pony" in base or "illustrious" in base:
@@ -92,6 +128,12 @@ def classify_lora(name, tensors, metadata):
 
     keys = tensors.keys()
     if _any(keys, "double_blocks") or _any(keys, "single_transformer_blocks") or _any(keys, "single_blocks"):
+        for key, shape in tensors.items():
+            if re.search(r"single_blocks[._]\d+[._]linear1\.(lora_up|lora_B)\.weight$", key) and shape:
+                if shape[0] in FLUX2_LINEAR1:
+                    return "flux2"
+                if shape[0] in FLUX1_LINEAR1:
+                    return "flux"
         return "flux"
     if _any(keys, "lora_te2_"):
         return "sdxl"

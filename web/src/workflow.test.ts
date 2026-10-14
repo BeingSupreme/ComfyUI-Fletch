@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compile, missingParts, pickFluxParts, resolve, type ApiWorkflow, type Link, type Settings } from "./workflow";
+import { compile, modelProblems, pickParts, resolve, type ApiWorkflow, type Link, type Settings } from "./workflow";
 
 const base: Settings = {
   model: { folder: "checkpoints", name: "juggernautXL.safetensors" },
@@ -27,6 +27,14 @@ const OUTPUTS: Record<string, number> = {
   FluxGuidance: 1,
   EmptyLatentImage: 1,
   EmptySD3LatentImage: 1,
+  EmptyFlux2LatentImage: 1,
+  CLIPLoader: 1,
+  ConditioningZeroOut: 1,
+  RandomNoise: 1,
+  KSamplerSelect: 1,
+  Flux2Scheduler: 1,
+  CFGGuider: 1,
+  SamplerCustomAdvanced: 2,
   KSampler: 1,
   VAEDecode: 1,
   SaveImage: 0,
@@ -149,6 +157,49 @@ describe("compile", () => {
     const s = { ...base, model: { folder: "diffusion_models" as const, name: "flux1-dev.safetensors" }, family: "flux_dev" as const };
     expect(() => compile(s, { t5: "t5xxl.safetensors" })).toThrow(/CLIP-L.*Flux VAE/);
   });
+
+  const klein = (family: "flux2_klein" | "flux2_klein_base") => ({
+    ...base,
+    model: { folder: "diffusion_models" as const, name: "flux-2-klein-4b-fp8.safetensors" },
+    family,
+    variant: "4b",
+  });
+  const kleinParts = { qwen: "qwen_3_4b.safetensors", vae: "flux2-vae.safetensors" };
+
+  it("builds FLUX.2 Klein the way ComfyUI's own template does", () => {
+    const wf = compile(klein("flux2_klein"), kleinParts);
+    expectWellFormed(wf);
+    expect(byType(wf, "KSampler")).toHaveLength(0);
+    expect(one(wf, "CLIPLoader")[1].inputs).toEqual({ clip_name: "qwen_3_4b.safetensors", type: "flux2", device: "default" });
+    expect(one(wf, "VAELoader")[1].inputs).toEqual({ vae_name: "flux2-vae.safetensors" });
+    const sca = one(wf, "SamplerCustomAdvanced")[1].inputs;
+    expect(follow(wf, sca.noise).inputs).toEqual({ noise_seed: 42 });
+    expect(follow(wf, sca.sampler).inputs).toEqual({ sampler_name: "euler" });
+    expect(follow(wf, sca.sigmas).inputs).toEqual({ steps: 4, width: 1024, height: 1024 });
+    expect(follow(wf, sca.latent_image).class_type).toBe("EmptyFlux2LatentImage");
+    const guider = follow(wf, sca.guider);
+    expect(guider.inputs.cfg).toBe(1);
+    // Distilled Klein has no negative prompt: the negative is the positive zeroed out.
+    const neg = follow(wf, guider.inputs.negative);
+    expect(neg.class_type).toBe("ConditioningZeroOut");
+    expect(neg.inputs.conditioning).toEqual(guider.inputs.positive);
+    expect(one(wf, "VAEDecode")[1].inputs.samples).toEqual([one(wf, "SamplerCustomAdvanced")[0], 0]);
+  });
+
+  it("gives Klein base a real negative prompt and CFG 5", () => {
+    const wf = compile(klein("flux2_klein_base"), kleinParts);
+    expectWellFormed(wf);
+    const guider = follow(wf, one(wf, "SamplerCustomAdvanced")[1].inputs.guider);
+    expect(guider.inputs.cfg).toBe(5);
+    expect(follow(wf, guider.inputs.negative).inputs.text).toBe("blurry");
+    expect(follow(wf, one(wf, "SamplerCustomAdvanced")[1].inputs.sigmas).inputs.steps).toBe(20);
+  });
+
+  it("refuses a checkpoint-folder Flux file that has no text encoder", () => {
+    const s = { ...klein("flux2_klein"), model: { folder: "checkpoints" as const, name: "Flux Klein FP8.safetensors" } };
+    expect(() => compile(s, kleinParts, false)).toThrow(/Move it to models\/diffusion_models/);
+    expect(compile(s, kleinParts, true)).toBeTruthy();
+  });
 });
 
 describe("resolve", () => {
@@ -159,23 +210,36 @@ describe("resolve", () => {
   });
 });
 
-describe("pickFluxParts", () => {
-  it("prefers fp8 T5 and finds clip_l and ae", () => {
+describe("pickParts", () => {
+  it("prefers fp8 T5 and finds clip_l and ae for FLUX.1", () => {
     expect(
-      pickFluxParts(
+      pickParts(
+        "flux_dev",
+        null,
         ["clip_g.safetensors", "t5xxl_fp16.safetensors", "t5xxl_fp8_e4m3fn.safetensors", "clip_l.safetensors"],
-        ["sdxl_vae.safetensors", "flux/ae.safetensors"],
+        ["sdxl_vae.safetensors", "flux2-vae.safetensors", "flux/ae.safetensors"],
       ),
     ).toEqual({ t5: "t5xxl_fp8_e4m3fn.safetensors", clipL: "clip_l.safetensors", vae: "flux/ae.safetensors" });
   });
 
-  it("falls back to any file with flux in its name for the VAE", () => {
-    expect(pickFluxParts([], ["flux_vae.safetensors"]).vae).toBe("flux_vae.safetensors");
+  it("falls back to any FLUX.1 file with flux in its name for the VAE", () => {
+    expect(pickParts("flux_dev", null, [], ["flux2-vae.safetensors", "flux_vae.safetensors"]).vae).toBe("flux_vae.safetensors");
   });
 
-  it("names what's missing", () => {
+  it("matches Klein's Qwen3 encoder to its size", () => {
+    const encoders = ["t5xxl_fp16.safetensors", "qwen_3_4b.safetensors", "qwen_3_8b_fp8mixed.safetensors"];
+    const vaes = ["ae.safetensors", "flux2-vae.safetensors"];
+    expect(pickParts("flux2_klein", "4b", encoders, vaes)).toEqual({ qwen: "qwen_3_4b.safetensors", vae: "flux2-vae.safetensors" });
+    expect(pickParts("flux2_klein", "9b", encoders, vaes).qwen).toBe("qwen_3_8b_fp8mixed.safetensors");
+  });
+
+  it("says what to add", () => {
     const s = { model: { folder: "diffusion_models" as const, name: "x" }, family: "flux_dev" as const };
-    expect(missingParts(s, {})).toHaveLength(3);
-    expect(missingParts({ ...s, family: "sdxl" }, {})).toEqual(["a full checkpoint (this file has no text encoders or VAE)"]);
+    expect(modelProblems(s, {})).toHaveLength(3);
+    expect(modelProblems({ ...s, family: "flux2_klein", variant: "9b" }, {})).toEqual([
+      "Add the Qwen3 text encoder (qwen_3_8b_fp8mixed.safetensors) to models/text_encoders.",
+      "Add the Flux 2 VAE (flux2-vae.safetensors) to models/vae.",
+    ]);
+    expect(modelProblems({ ...s, family: "sdxl" }, {})[0]).toMatch(/full checkpoint/);
   });
 });

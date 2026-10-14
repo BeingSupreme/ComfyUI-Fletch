@@ -66,6 +66,7 @@ export async function loadCatalog(): Promise<Catalog> {
 
 export interface ModelInfo {
   family: string | null;
+  variant?: string | null;
   has_vae?: boolean;
   has_text_encoders?: boolean;
   reason?: string;
@@ -76,7 +77,7 @@ export const modelInfo = (folder: string, name: string): Promise<ModelInfo> =>
 
 export interface LoraInfo {
   name: string;
-  family: "sd15" | "sdxl" | "flux" | null;
+  family: "sd15" | "sdxl" | "flux" | "flux2" | null;
 }
 
 export const listLoras = (): Promise<LoraInfo[]> => getJson("/fletch/api/loras");

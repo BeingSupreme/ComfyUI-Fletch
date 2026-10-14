@@ -11,12 +11,12 @@ import {
   type ImageRef,
   type LoraInfo,
 } from "./comfy";
-import { FAMILIES, isFamily, PROFILES, type Family, type Quality, type Shape } from "./profiles";
+import { FAMILIES, isFamily, PROFILES, UNSUPPORTED, type Family, type Quality, type Shape } from "./profiles";
 import { load, save } from "./store";
 import {
   compile,
-  missingParts,
-  pickFluxParts,
+  modelProblems,
+  pickParts,
   randomSeed,
   resolve,
   type Advanced,
@@ -95,7 +95,13 @@ export function App() {
   const [catalog, setCatalog] = useState<Catalog>(EMPTY_CATALOG);
   const [loras, setLoras] = useState<LoraInfo[]>([]);
   const [choices, setChoices] = useState<Choices>(() => ({ ...DEFAULT_CHOICES, ...load("choices", {}) }));
-  const [detected, setDetected] = useState<{ key: string; family: string | null; reason?: string } | null>(null);
+  const [detected, setDetected] = useState<{
+    key: string;
+    family: string | null;
+    variant?: string | null;
+    hasTextEncoders?: boolean;
+    reason?: string;
+  } | null>(null);
   const [overrides, setOverrides] = useState<Record<string, Family>>(() => load("familyOverrides", {}));
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [preview, setPreview] = useState<string | null>(null);
@@ -132,7 +138,8 @@ export function App() {
     if (!choices.model || !connected) return;
     const k = modelKey(choices.model);
     modelInfo(choices.model.folder, choices.model.name).then(
-      (info) => setDetected({ key: k, family: info.family, reason: info.reason }),
+      (info) =>
+        setDetected({ key: k, family: info.family, variant: info.variant, hasTextEncoders: info.has_text_encoders, reason: info.reason }),
       (e) => setDetected({ key: k, family: null, reason: String(e.message ?? e) }),
     );
   }, [key, connected]);
@@ -140,8 +147,13 @@ export function App() {
   const detectedFamily = detected?.key === key && isFamily(detected.family) ? detected.family : null;
   const family: Family | null = overrides[key] ?? detectedFamily;
   const profile = family ? PROFILES[family] : null;
-  const parts = useMemo(() => pickFluxParts(catalog.textEncoders, catalog.vaes), [catalog]);
-  const missing = choices.model && family ? missingParts({ model: choices.model, family }, parts) : [];
+  const current = detected?.key === key ? detected : null;
+  const variant = current?.variant ?? null;
+  const parts = useMemo(
+    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes) : {}),
+    [family, variant, catalog],
+  );
+  const problems = choices.model && family ? modelProblems({ model: choices.model, family, variant }, parts, current?.hasTextEncoders) : [];
   const numbers = family ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced: choices.advanced }) : null;
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
@@ -152,6 +164,7 @@ export function App() {
     return {
       model: choices.model,
       family,
+      variant,
       positive: choices.positive,
       negative: choices.negative,
       shape: choices.shape,
@@ -170,7 +183,7 @@ export function App() {
     setPreview(null);
     setSelected(null);
     try {
-      const id = await queuePrompt(compile(settings, parts), { fletch: settings });
+      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders), { fletch: settings });
       const stop = watch(id, (e) => {
         if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
         else if (e.kind === "preview") setPreview(e.url);
@@ -213,7 +226,7 @@ export function App() {
     update({ loras: choices.loras.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
 
   const running = status.kind === "running";
-  const canGenerate = connected && !!family && missing.length === 0 && choices.positive.trim() !== "" && !running;
+  const canGenerate = connected && !!family && problems.length === 0 && choices.positive.trim() !== "" && !running;
   const familyName = (f: Family) => PROFILES[f].label;
 
   return (
@@ -284,10 +297,15 @@ export function App() {
           )}
           {detected?.key === key && !detectedFamily && !overrides[key] && (
             <p className="warn-text small">
-              {detected.family ? `This looks like a ${detected.family.toUpperCase()} model, which Fletch doesn't support yet.` : "Couldn't tell what kind of model this is."} Pick its family above to use it anyway.
+              {detected.family
+                ? `This looks like a ${UNSUPPORTED[detected.family] ?? detected.family} model, which Fletch doesn't support yet.`
+                : "Couldn't tell what kind of model this is."}{" "}
+              Pick its family above to use it anyway.
             </p>
           )}
-          {missing.length > 0 && <p className="warn-text small">This model also needs {missing.join(", ")}.</p>}
+          {problems.map((p) => (
+            <p key={p} className="warn-text small">{p}</p>
+          ))}
         </section>
 
         <section>
@@ -313,7 +331,7 @@ export function App() {
                   <select value={l.name} onChange={(e) => setLora(i, { name: e.target.value })}>
                     <option value="">Choose a LoRA</option>
                     {compatibleLoras.length > 0 && (
-                      <optgroup label={`For ${profile!.loraBase === "sdxl" ? "SDXL, Pony and Illustrious" : familyName(family!)}`}>
+                      <optgroup label={`For ${profile!.loraBase === "sdxl" ? "SDXL, Pony and Illustrious" : profile!.loraBase === "flux2" ? "Flux.2 Klein" : familyName(family!)}`}>
                         {compatibleLoras.map((x) => (
                           <option key={x.name}>{x.name}</option>
                         ))}
@@ -374,8 +392,12 @@ export function App() {
             </label>
             <label>
               <span className="label">Scheduler</span>
-              <select value={choices.advanced.scheduler ?? ""} onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}>
-                <option value="">Auto{profile ? ` (${profile.scheduler})` : ""}</option>
+              <select
+                value={choices.advanced.scheduler ?? ""}
+                disabled={profile?.arch === "flux2"}
+                onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
+              >
+                <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
                 {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
               </select>
             </label>

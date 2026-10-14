@@ -43,6 +43,16 @@ export function guideModeAvailable(mode: GuideMode, catalog: Catalog) {
 
 /** null when an add-on can run, otherwise what's missing, in words a person can act on. */
 export function unavailable(profile: Profile | null, catalog: Catalog, controlnets: LoraInfo[]): Record<AddonKey, string | null> {
+  if (profile?.video) {
+    const notVideo = "Not available for video yet.";
+    return {
+      source: profile.video.image === "none" ? "This model makes video from text only. Pick the image-to-video model to start from a picture." : null,
+      hires: notVideo,
+      upscale: notVideo,
+      faceFix: notVideo,
+      guide: notVideo,
+    };
+  }
   const flux2 = profile?.arch === "flux2" ? "Not available for Flux.2 models yet." : null;
   // No ControlNets exist for Krea 2 yet.
   const noGuide = profile?.arch === "krea2" ? "Not available for Krea 2 yet." : flux2;
@@ -73,8 +83,8 @@ export function addonsForRun(
   allowedControlnets: Set<string>,
 ): Addons {
   const out: Addons = {};
-  if (a.source.on && a.source.image) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength };
-  if (a.hires.on) out.hires = { scale: a.hires.scale, strength: a.hires.strength };
+  if (a.source.on && a.source.image && !blocked.source) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength };
+  if (a.hires.on && !blocked.hires) out.hires = { scale: a.hires.scale, strength: a.hires.strength };
   if (a.upscale.on && !blocked.upscale) {
     const model = catalog.upscaleModels.includes(a.upscale.model) ? a.upscale.model : catalog.upscaleModels[0];
     out.upscale = { model };

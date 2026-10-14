@@ -78,8 +78,9 @@ export function AddonCards(props: {
 
   return (
     <>
-      <Toggle label="Start from an image" on={a.source.on} onChange={(on) => set("source", { on })} />
-      {a.source.on && (
+      <Toggle label="Start from an image" on={a.source.on} disabled={!!blocked.source} onChange={(on) => set("source", { on })} />
+      {note("source")}
+      {a.source.on && !blocked.source && (
         <div className="sub">
           <ImageDrop
             label="Drop a picture here, or click to choose one"
@@ -87,7 +88,10 @@ export function AddonCards(props: {
             onImage={(image) => set("source", { image, masked: undefined })}
             onError={props.onError}
           />
-          {a.source.image && (
+          {a.source.image && props.profile?.video && (
+            <p className="muted small note">The video starts from this picture.</p>
+          )}
+          {a.source.image && !props.profile?.video && (
             <>
               <Slider label="Change" value={a.source.strength} min={0.05} max={1} step={0.05} onChange={(strength) => set("source", { strength })} />
               <div className="row small">
@@ -104,8 +108,9 @@ export function AddonCards(props: {
         </div>
       )}
 
-      <Toggle label="Hires fix" on={a.hires.on} onChange={(on) => set("hires", { on })} />
-      {a.hires.on && (
+      <Toggle label="Hires fix" on={a.hires.on} disabled={!!blocked.hires} onChange={(on) => set("hires", { on })} />
+      {note("hires")}
+      {a.hires.on && !blocked.hires && (
         <div className="sub">
           <div className="chips">
             {[1.5, 2].map((scale) => (

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
 import { HistoryBar } from "./HistoryBar";
+import { findSpeedLoras } from "./video";
 import { MaskPainter } from "./MaskPainter";
 import {
   connect,
@@ -24,7 +25,7 @@ import { FAMILIES, isFamily, PROFILES, UNSUPPORTED, type Family, type Quality, t
 import { load, save } from "./store";
 import {
   compile,
-  modelProblems,
+  runProblems,
   pickParts,
   randomSeed,
   resolve,
@@ -38,6 +39,28 @@ import {
 /** Fletch's own save node is only needed for folders outside ComfyUI's output. */
 const destination = (o: OutputFolder | null): Destination =>
   !o ? {} : o.inside_output ? { subfolder: o.subfolder || undefined } : { folder: o.path };
+
+/** The final frame of a video, as a PNG. */
+function lastFrame(url: string): Promise<Blob> {
+  return new Promise((done, fail) => {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.preload = "auto";
+    v.onerror = () => fail(new Error("Couldn't read the video's last frame."));
+    v.onloadedmetadata = () => {
+      v.currentTime = Math.max(0, v.duration - 0.01);
+    };
+    v.onseeked = () => {
+      const c = document.createElement("canvas");
+      [c.width, c.height] = [v.videoWidth, v.videoHeight];
+      c.getContext("2d")!.drawImage(v, 0, 0);
+      c.toBlob((b) => (b ? done(b) : fail(new Error("Couldn't read the video's last frame."))), "image/png");
+    };
+    v.src = url;
+  });
+}
+
+const isVideo = (nameOrUrl: string) => /\.(mp4|webm|mkv|mov)(&|$)/i.test(nameOrUrl);
 
 type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
 
@@ -63,6 +86,8 @@ interface Choices {
   /** Fixed seed, or null for a new random seed every run. */
   seed: number | null;
   addons: AddonChoices;
+  /** Video length in seconds. */
+  seconds: number;
 }
 
 const DEFAULT_CHOICES: Choices = {
@@ -76,6 +101,7 @@ const DEFAULT_CHOICES: Choices = {
   advanced: {},
   seed: null,
   addons: DEFAULT_ADDONS,
+  seconds: 5,
 };
 
 /** Saved choices from an older version may lack newer fields; fill them from the defaults. */
@@ -92,6 +118,7 @@ const EMPTY_CATALOG: Catalog = {
   diffusionModels: [],
   textEncoders: [],
   vaes: [],
+  latentUpscalers: [],
   samplers: [],
   schedulers: [],
   upscaleModels: [],
@@ -104,7 +131,7 @@ const modelKey = (m: { folder: string; name: string }) => `${m.folder}:${m.name}
 const SHAPES: [Shape, string][] = [["square", "Square"], ["portrait", "Portrait"], ["wide", "Wide"]];
 const QUALITIES: [Quality, string][] = [["fast", "Fast"], ["balanced", "Balanced"], ["best", "Best"]];
 
-function Chips<T extends string>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
+function Chips<T extends string | number>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
   return (
     <div className="chips">
       {props.options.map(([v, label]) => (
@@ -199,18 +226,27 @@ export function App() {
   const current = detected?.key === key ? detected : null;
   const variant = current?.variant ?? null;
   const parts = useMemo(
-    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes) : {}),
-    [family, variant, catalog],
+    () =>
+      family
+        ? pickParts(family, variant, catalog.textEncoders, catalog.vaes, choices.model?.name, catalog.diffusionModels, {
+            loras: loras.map((l) => l.name),
+            latentUpscalers: catalog.latentUpscalers,
+          })
+        : {},
+    [family, variant, catalog, choices.model?.name, loras],
   );
-  const problems = choices.model && family ? modelProblems({ model: choices.model, family, variant }, parts, current?.hasTextEncoders) : [];
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
   const usableLoras = new Set([...compatibleLoras, ...unknownLoras].map((l) => l.name));
   const blocked = unavailable(profile, catalog, controlnets);
   const usableControlnets = new Set(profile ? controlnetsFor(profile, controlnets).map((c) => c.name) : []);
   const runAddons = addonsForRun(choices.addons, blocked, catalog, usableControlnets);
+  const problems =
+    choices.model && family ? runProblems({ model: choices.model, family, variant, addons: runAddons }, parts, current?.hasTextEncoders) : [];
+  const speedLora =
+    family && profile?.video?.experts && choices.quality === "fast" ? findSpeedLoras(family, loras.map((l) => l.name)) : undefined;
   const numbers = family
-    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons })
+    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons, seconds: choices.seconds, speedLora })
     : null;
 
   function settingsForRun(): Settings | null {
@@ -228,6 +264,7 @@ export function App() {
       seed: choices.seed ?? randomSeed(),
       advanced,
       addons: runAddons,
+      ...(profile?.video ? { seconds: numbers?.seconds, speedLora } : {}),
     };
   }
 
@@ -274,6 +311,7 @@ export function App() {
       loras: s.loras.length ? s.loras : c.loras,
       advanced: s.advanced,
       advancedFor: s.family,
+      seconds: s.seconds ?? c.seconds,
       seed: s.seed,
       addons: {
         source: { ...c.addons.source, on: !!s.addons?.source, ...s.addons?.source },
@@ -290,6 +328,17 @@ export function App() {
     try {
       const blob = await (await fetch(imageUrl(entry.image))).blob();
       setAddon("source", { on: true, image: await uploadImage(blob, entry.image.filename), masked: undefined });
+    } catch (e) {
+      setStatus({ kind: "error", message: String((e as Error).message ?? e) });
+    }
+  }
+
+  /** Chain clips: the last frame of a finished video becomes the start picture for the next. */
+  async function continueFrom(entry: HistoryEntry) {
+    try {
+      const blob = await lastFrame(imageUrl(entry.image));
+      const name = entry.image.filename.replace(/\.[^.]+$/, "") + "-last.png";
+      setAddon("source", { on: true, image: await uploadImage(blob, name), masked: undefined });
     } catch (e) {
       setStatus({ kind: "error", message: String((e as Error).message ?? e) });
     }
@@ -375,7 +424,9 @@ export function App() {
           )}
           {numbers && profile && (
             <p className="muted small">
-              Auto: {numbers.width} x {numbers.height}, {numbers.steps} steps, CFG {numbers.cfg}
+              Auto: {numbers.width} x {numbers.height}
+              {profile.video && `, ${numbers.seconds}s at ${profile.video.fps} fps`}, {numbers.steps} steps, CFG {numbers.cfg}
+              {speedLora && " (4-step speed LoRAs)"}
               {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
               {profile.positivePrefix && ", adds quality tags"}
             </p>
@@ -402,10 +453,23 @@ export function App() {
           )}
         </section>
 
-        <section>
-          <span className="label">Quality</span>
-          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
-        </section>
+        {profile?.video && numbers && (
+          <section>
+            <span className="label">Length</span>
+            <Chips
+              options={profile.video.seconds.map((n) => [n, `${n} sec`] as [number, string])}
+              value={numbers.seconds}
+              onChange={(seconds) => update({ seconds })}
+            />
+          </section>
+        )}
+
+        {!profile?.fixedSchedule && (
+          <section>
+            <span className="label">Quality</span>
+            <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
+          </section>
+        )}
 
         <section>
           <span className="label">Add-ons</span>
@@ -469,49 +533,53 @@ export function App() {
         <details>
           <summary>Advanced</summary>
           <div className="advanced">
-            <label>
-              <span className="label">Steps</span>
-              <input
-                inputMode="numeric" placeholder={numbers ? String(profile!.steps[choices.quality]) : ""}
-                value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">CFG</span>
-              <input
-                inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
-                value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">Sampler</span>
-              <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
-                <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
-                {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Scheduler</span>
-              <select
-                value={advanced.scheduler ?? ""}
-                disabled={profile?.arch === "flux2"}
-                onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
-              >
-                <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
-                {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Clip skip</span>
-              <select
-                value={advanced.clipSkip ?? ""}
-                onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
-              >
-                <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
-                <option value="1">1</option>
-                <option value="2">2</option>
-              </select>
-            </label>
+            {!profile?.fixedSchedule && (
+              <>
+                <label>
+                  <span className="label">Steps</span>
+                  <input
+                    inputMode="numeric" placeholder={numbers ? String(speedLora ? 4 : profile!.steps[choices.quality]) : ""}
+                    value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">CFG</span>
+                  <input
+                    inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
+                    value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">Sampler</span>
+                  <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
+                    <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
+                    {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Scheduler</span>
+                  <select
+                    value={advanced.scheduler ?? ""}
+                    disabled={profile?.arch === "flux2"}
+                    onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
+                  >
+                    <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
+                    {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Clip skip</span>
+                  <select
+                    value={advanced.clipSkip ?? ""}
+                    onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
+                  >
+                    <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                  </select>
+                </label>
+              </>
+            )}
             <label>
               <span className="label">Seed</span>
               <input
@@ -545,7 +613,15 @@ export function App() {
         </div>
 
         <div className="preview">
-          {preview ? <img src={preview} alt="Latest result" /> : <span className="muted">Your image appears here</span>}
+          {preview ? (
+            isVideo(preview) ? (
+              <video src={preview} autoPlay loop muted controls playsInline />
+            ) : (
+              <img src={preview} alt="Latest result" />
+            )
+          ) : (
+            <span className="muted">Your {profile?.video ? "video" : "image"} appears here</span>
+          )}
           {running && (
             <div className="progress">
               <span className="small muted">Step {status.step} of {status.of}</span>
@@ -563,7 +639,11 @@ export function App() {
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
             <span className="actions">
-              <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              {isVideo(selected.image.filename) ? (
+                <button className="link" onClick={() => continueFrom(selected)}>Continue from last frame</button>
+              ) : (
+                <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              )}
               <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
             </span>
           </div>
@@ -582,18 +662,18 @@ export function App() {
         />
         {history.length > 0 && (
           <div className="history">
-            {history.map((h) => (
-              <img
-                key={`${h.image.subfolder}/${h.image.filename}`}
-                src={imageUrl(h.image)}
-                alt=""
-                className={selected === h ? "on" : ""}
-                onClick={() => {
+            {history.map((h) => {
+              const props = {
+                key: `${h.image.subfolder}/${h.image.filename}`,
+                src: imageUrl(h.image),
+                className: selected === h ? "on" : "",
+                onClick: () => {
                   setPreview(imageUrl(h.image));
                   setSelected(h);
-                }}
-              />
-            ))}
+                },
+              };
+              return isVideo(h.image.filename) ? <video {...props} muted preload="metadata" /> : <img {...props} alt="" />;
+            })}
           </div>
         )}
       </main>

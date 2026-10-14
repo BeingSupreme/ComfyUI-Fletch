@@ -73,3 +73,27 @@ def test_save_node_writes_png_with_metadata(tmp_path):
     assert Image.open(folder / names[0]).text["fletch"] == '{"seed": 1}'
     again = FletchSaveImage().save(images[:1], str(folder))
     assert again["ui"]["images"][0]["filename"] == "fletch_00003_.png"
+
+
+def test_save_video_node_numbers_files_and_passes_metadata(tmp_path, monkeypatch):
+    calls = []
+
+    class Video:
+        def save_to(self, path, format=None, codec=None, metadata=None):
+            calls.append((os.path.basename(path), format, codec, metadata))
+            open(path, "wb").close()
+
+    types_ = types.SimpleNamespace(VideoContainer=lambda v: f"container:{v}", VideoCodec=lambda v: f"codec:{v}")
+    latest = types.ModuleType("comfy_api.latest")
+    latest.Types = types_
+    monkeypatch.setitem(sys.modules, "comfy_api", types.ModuleType("comfy_api"))
+    monkeypatch.setitem(sys.modules, "comfy_api.latest", latest)
+    pytest.importorskip("numpy")
+    from backend.nodes import FletchSaveVideo
+
+    folder = tmp_path / "clips"
+    out = FletchSaveVideo().save(Video(), str(folder), extra_pnginfo={"fletch": {"seed": 3}})
+    FletchSaveVideo().save(Video(), str(folder))
+    assert out["ui"]["images"] == [{"filename": "fletch_00001_.mp4", "subfolder": str(folder), "type": "fletch"}]
+    assert calls[0] == ("fletch_00001_.mp4", "container:mp4", "codec:auto", {"fletch": {"seed": 3}})
+    assert calls[1][0] == "fletch_00002_.mp4" and calls[1][3] is None

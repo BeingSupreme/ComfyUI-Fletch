@@ -54,6 +54,7 @@ const OUTPUTS: Record<string, number> = {
   KSampler: 1,
   VAEDecode: 1,
   SaveImage: 0,
+  FletchSaveImage: 0,
 };
 
 const isLink = (v: unknown): v is Link =>
@@ -68,7 +69,7 @@ function expectWellFormed(wf: ApiWorkflow) {
       expect(v[1]).toBeLessThan(OUTPUTS[wf[v[0]].class_type]);
     }
   }
-  expect(Object.values(wf).filter((n) => n.class_type === "SaveImage")).toHaveLength(1);
+  expect(Object.values(wf).filter((n) => n.class_type === "SaveImage" || n.class_type === "FletchSaveImage")).toHaveLength(1);
 }
 
 const byType = (wf: ApiWorkflow, type: string) => Object.entries(wf).filter(([, n]) => n.class_type === type);
@@ -253,6 +254,19 @@ describe("Krea 2", () => {
     const vaes = ["flux2-vae.safetensors", "qwen_image_vae.safetensors"];
     expect(pickParts("krea2_turbo", null, encoders, vaes)).toEqual(kreaParts);
     expect(pickParts("flux2_klein", null, encoders, vaes).qwen).toBe("qwen_3_4b.safetensors");
+  });
+});
+
+describe("save destination", () => {
+  it("saves into ComfyUI's output by default, into a subfolder, or anywhere with Fletch's node", () => {
+    expect(one(compile(base), "SaveImage")[1].inputs.filename_prefix).toBe("fletch");
+    expect(one(compile(base, {}, undefined, {}, { subfolder: "portraits/2026" }), "SaveImage")[1].inputs.filename_prefix).toBe(
+      "portraits/2026/fletch",
+    );
+    const wf = compile(base, {}, undefined, {}, { folder: "D:\\Art\\Fletch" });
+    expectWellFormed(wf);
+    expect(byType(wf, "SaveImage")).toHaveLength(0);
+    expect(one(wf, "FletchSaveImage")[1].inputs).toMatchObject({ folder: "D:\\Art\\Fletch", filename_prefix: "fletch" });
   });
 });
 

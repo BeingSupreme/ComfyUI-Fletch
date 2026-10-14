@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
+import { HistoryBar } from "./HistoryBar";
 import { MaskPainter } from "./MaskPainter";
 import {
   connect,
@@ -16,6 +17,8 @@ import {
   type Catalog,
   type ImageRef,
   type LoraInfo,
+  getOutputFolder,
+  type OutputFolder,
 } from "./comfy";
 import { FAMILIES, isFamily, PROFILES, UNSUPPORTED, type Family, type Quality, type Shape } from "./profiles";
 import { load, save } from "./store";
@@ -27,9 +30,14 @@ import {
   resolve,
   type Advanced,
   type LoraChoice,
+  type Destination,
   type ModelFolder,
   type Settings,
 } from "./workflow";
+
+/** Fletch's own save node is only needed for folders outside ComfyUI's output. */
+const destination = (o: OutputFolder | null): Destination =>
+  !o ? {} : o.inside_output ? { subfolder: o.subfolder || undefined } : { folder: o.path };
 
 type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
 
@@ -136,6 +144,10 @@ export function App() {
   const [preview, setPreview] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(() => load("history", []));
   const [selected, setSelected] = useState<HistoryEntry | null>(null);
+  const [output, setOutput] = useState<OutputFolder | null>(null);
+  useEffect(() => {
+    getOutputFolder().then(setOutput, () => setOutput(null));
+  }, []);
 
   const update = (patch: Partial<Choices>) => setChoices((c) => ({ ...c, ...patch }));
   const setAdvanced = (patch: Partial<Advanced>) => setChoices((c) => ({ ...c, advanced: { ...c.advanced, ...patch } }));
@@ -221,7 +233,7 @@ export function App() {
     setPreview(null);
     setSelected(null);
     try {
-      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders, catalog.nodes), { fletch: settings });
+      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders, catalog.nodes, destination(output)), { fletch: settings });
       const stop = watch(id, (e) => {
         if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
         else if (e.kind === "preview") setPreview(e.url);
@@ -548,11 +560,22 @@ export function App() {
           </div>
         )}
 
+        <HistoryBar
+          output={output}
+          onOutput={setOutput}
+          count={history.length}
+          onClear={() => {
+            setHistory([]);
+            setSelected(null);
+            setPreview(null);
+          }}
+          onError={(message) => setStatus({ kind: "error", message })}
+        />
         {history.length > 0 && (
           <div className="history">
             {history.map((h) => (
               <img
-                key={h.image.filename}
+                key={`${h.image.subfolder}/${h.image.filename}`}
                 src={imageUrl(h.image)}
                 alt=""
                 className={selected === h ? "on" : ""}

@@ -245,7 +245,19 @@ class Graph {
 
 const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
 
-export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolean, nodes: NodeInfos = {}): ApiWorkflow {
+/** Where to save: a folder inside ComfyUI's output (`subfolder`) or anywhere else (`folder`). */
+export interface Destination {
+  subfolder?: string;
+  folder?: string;
+}
+
+export function compile(
+  s: Settings,
+  parts: Parts = {},
+  hasTextEncoders?: boolean,
+  nodes: NodeInfos = {},
+  dest: Destination = {},
+): ApiWorkflow {
   const problems = modelProblems(s, parts, hasTextEncoders);
   if (problems.length) throw new Error(problems.join(" "));
 
@@ -419,6 +431,7 @@ export function compile(s: Settings, parts: Parts = {}, hasTextEncoders?: boolea
   }
 
   // 7. Save
-  g.add("SaveImage", { images: IMAGE, filename_prefix: "fletch" });
+  if (dest.folder) g.add("FletchSaveImage", { images: IMAGE, folder: dest.folder, filename_prefix: "fletch" });
+  else g.add("SaveImage", { images: IMAGE, filename_prefix: dest.subfolder ? `${dest.subfolder}/fletch` : "fletch" });
   return g.nodes;
 }

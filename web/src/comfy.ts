@@ -152,7 +152,34 @@ export async function queuePrompt(prompt: ApiWorkflow, extra?: Record<string, un
 }
 
 export const imageUrl = (img: ImageRef) =>
-  `/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`;
+  img.type === "fletch"
+    ? `/fletch/api/image?${new URLSearchParams({ folder: img.subfolder, filename: img.filename })}`
+    : `/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`;
+
+/** Where images are saved. `subfolder` is set when the folder is inside ComfyUI's output. */
+export interface OutputFolder {
+  folder: string;
+  path: string;
+  subfolder: string | null;
+  inside_output: boolean;
+}
+
+async function postJson(url: string, body?: unknown) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error ?? `Request failed (${res.status})`), { status: res.status });
+  return data;
+}
+
+export const getOutputFolder = (): Promise<OutputFolder> => getJson("/fletch/api/output");
+export const setOutputFolder = (folder: string): Promise<OutputFolder> => postJson("/fletch/api/output", { folder });
+/** Opens the system folder picker on the ComfyUI machine; null if cancelled. Throws status 501 if it can't. */
+export const pickOutputFolder = async (): Promise<string | null> => (await postJson("/fletch/api/output/pick")).folder ?? null;
+export const openOutputFolder = () => postJson("/fletch/api/output/open");
 
 // One websocket for the page; run listeners are keyed by prompt id.
 type Listener = (e: RunEvent) => void;

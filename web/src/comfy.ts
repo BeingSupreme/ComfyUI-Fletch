@@ -27,18 +27,67 @@ function comboOptions(spec: unknown): string[] {
   return [];
 }
 
-export async function listCheckpoints(): Promise<string[]> {
-  const res = await fetch("/object_info/CheckpointLoaderSimple");
-  if (!res.ok) throw new Error(`ComfyUI answered ${res.status}`);
-  const info = await res.json();
-  return comboOptions(info.CheckpointLoaderSimple?.input?.required?.ckpt_name);
+async function getJson(url: string) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`ComfyUI answered ${res.status} for ${url}`);
+  return res.json();
 }
 
-export async function queuePrompt(prompt: ApiWorkflow): Promise<string> {
+/** The choices ComfyUI offers for one node input, e.g. every file in models/checkpoints. */
+export async function listOptions(classType: string, input: string): Promise<string[]> {
+  try {
+    const info = await getJson(`/object_info/${classType}`);
+    return comboOptions(info[classType]?.input?.required?.[input]);
+  } catch {
+    return []; // node not installed
+  }
+}
+
+export interface Catalog {
+  checkpoints: string[];
+  diffusionModels: string[];
+  textEncoders: string[];
+  vaes: string[];
+  samplers: string[];
+  schedulers: string[];
+}
+
+export async function loadCatalog(): Promise<Catalog> {
+  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers] = await Promise.all([
+    listOptions("CheckpointLoaderSimple", "ckpt_name"),
+    listOptions("UNETLoader", "unet_name"),
+    listOptions("DualCLIPLoader", "clip_name1"),
+    listOptions("VAELoader", "vae_name"),
+    listOptions("KSampler", "sampler_name"),
+    listOptions("KSampler", "scheduler"),
+  ]);
+  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers };
+}
+
+export interface ModelInfo {
+  family: string | null;
+  variant?: string | null;
+  has_vae?: boolean;
+  has_text_encoders?: boolean;
+  reason?: string;
+}
+
+export const modelInfo = (folder: string, name: string): Promise<ModelInfo> =>
+  getJson(`/fletch/api/model_info?${new URLSearchParams({ folder, name })}`);
+
+export interface LoraInfo {
+  name: string;
+  family: "sd15" | "sdxl" | "flux" | "flux2" | null;
+}
+
+export const listLoras = (): Promise<LoraInfo[]> => getJson("/fletch/api/loras");
+
+/** Queue a workflow. `extra` is written into the saved PNG's metadata by SaveImage. */
+export async function queuePrompt(prompt: ApiWorkflow, extra?: Record<string, unknown>): Promise<string> {
   const res = await fetch("/prompt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, client_id: clientId }),
+    body: JSON.stringify({ prompt, client_id: clientId, extra_data: extra ? { extra_pnginfo: extra } : undefined }),
   });
   const body = await res.json();
   if (!res.ok) {

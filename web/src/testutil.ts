@@ -78,6 +78,8 @@ export const OUTPUTS: Record<string, number> = {
   LTXVCropGuides: 3,
   VAEDecodeTiled: 1,
   LTXVAudioVAEDecode: 1,
+  ImageFromBatch: 1,
+  FletchSaveGif: 0,
 };
 
 export const isLink = (v: unknown): v is Link =>
@@ -92,7 +94,7 @@ export function expectWellFormed(wf: ApiWorkflow) {
       expect(v[1]).toBeLessThan(OUTPUTS[wf[v[0]].class_type]);
     }
   }
-  const saves = ["SaveImage", "FletchSaveImage", "SaveVideo", "FletchSaveVideo"];
+  const saves = ["SaveImage", "FletchSaveImage", "SaveVideo", "FletchSaveVideo", "FletchSaveGif"];
   expect(Object.values(wf).filter((n) => saves.includes(n.class_type))).toHaveLength(1);
 }
 

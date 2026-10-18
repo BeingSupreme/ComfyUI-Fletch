@@ -86,8 +86,53 @@ class FletchSaveVideo:
         return {"ui": {"images": [{"filename": name, "subfolder": folder, "type": "fletch"}], "animated": (True,)}}
 
 
-NODE_CLASS_MAPPINGS = {"FletchSaveImage": FletchSaveImage, "FletchSaveVideo": FletchSaveVideo}
+def write_gif(images, fps, path):
+    """Frames (N x H x W x 3, 0-1) to a looping GIF, each frame with its own 256-colour palette."""
+    frames = [
+        Image.fromarray(np.clip(255.0 * image.cpu().numpy(), 0, 255).astype(np.uint8)).convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
+        for image in images
+    ]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=round(1000 / max(fps, 1)), loop=0, disposal=1)
+
+
+class FletchSaveGif:
+    """Saves frames as an animated GIF: into ComfyUI's output (folder empty) or any folder."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "fps": ("FLOAT", {"default": 10.0, "min": 0.1, "max": 100.0}),
+                "folder": ("STRING", {"default": ""}),
+                "filename_prefix": ("STRING", {"default": "fletch"}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "Fletch"
+
+    def save(self, images, fps, folder="", filename_prefix="fletch"):
+        if folder:
+            target, subfolder, kind = folder, folder, "fletch"
+        else:
+            import folder_paths  # only inside ComfyUI
+
+            subfolder, _, filename_prefix = filename_prefix.rpartition("/")
+            target, kind = os.path.join(folder_paths.get_output_directory(), subfolder), "output"
+        os.makedirs(target, exist_ok=True)
+        pattern = re.compile(rf"^{re.escape(filename_prefix)}_(\d+)_\.gif$")
+        index = max([int(m.group(1)) for n in os.listdir(target) if (m := pattern.match(n))], default=0) + 1
+        name = f"{filename_prefix}_{index:05}_.gif"
+        write_gif(images, fps, os.path.join(target, name))
+        return {"ui": {"images": [{"filename": name, "subfolder": subfolder, "type": kind}], "animated": (True,)}}
+
+
+NODE_CLASS_MAPPINGS = {"FletchSaveImage": FletchSaveImage, "FletchSaveVideo": FletchSaveVideo, "FletchSaveGif": FletchSaveGif}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FletchSaveImage": "Save Image (Fletch, any folder)",
     "FletchSaveVideo": "Save Video (Fletch, any folder)",
+    "FletchSaveGif": "Save GIF (Fletch)",
 }

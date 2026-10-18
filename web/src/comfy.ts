@@ -1,6 +1,7 @@
 // Thin client for ComfyUI's HTTP and websocket API. Fletch is served by ComfyUI itself,
 // so every call is same-origin (the Vite dev server proxies them in development).
 
+import { gifInfo } from "./gif";
 import type { ApiWorkflow, InputImage, NodeInfo, NodeInfos } from "./workflow";
 
 export interface ImageRef {
@@ -113,7 +114,8 @@ export async function uploadImage(file: Blob, filename: string): Promise<InputIm
   const res = await fetch("/upload/image", { method: "POST", body: form });
   if (!res.ok) throw new Error(`ComfyUI couldn't save the image (${res.status})`);
   const body = await res.json();
-  return { name: body.subfolder ? `${body.subfolder}/${body.name}` : body.name, ...size };
+  const gif = file.type === "image/gif" || /\.gif$/i.test(filename) ? gifInfo(await file.arrayBuffer()) : null;
+  return { name: body.subfolder ? `${body.subfolder}/${body.name}` : body.name, ...size, ...(gif && gif.frames > 1 ? gif : {}) };
 }
 
 export const inputImageUrl = (img: InputImage) => {

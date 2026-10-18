@@ -37,6 +37,9 @@ export interface InputImage {
   name: string;
   width: number;
   height: number;
+  /** Animated GIFs: how many frames, and how fast they play. */
+  frames?: number;
+  fps?: number;
 }
 
 /** Start from an image (img2img), optionally repainting only a masked area (inpaint). */
@@ -349,12 +352,21 @@ export interface Destination {
 export function runProblems(s: Pick<Settings, "model" | "family" | "variant" | "addons">, parts: Parts, hasTextEncoders?: boolean): string[] {
   const problems = modelProblems(s, parts, hasTextEncoders);
   const v = PROFILES[s.family].video;
-  if (v?.image === "required" && !s.addons?.source)
+  const source = s.addons?.source;
+  const gif = isAnimated(source?.image);
+  if (!v && gif)
+    problems.push("Animated GIFs work with the video models (Wan 2.2 or LTX-2.3). Pick one of those, or start from a still picture.");
+  if (v?.image === "required" && !source)
     problems.push("This model turns a picture into a video. Turn on Start from an image and add one.");
-  if (v?.image === "none" && s.addons?.source)
-    problems.push("This model makes video from text only. Turn off Start from an image, or pick the image-to-video model.");
+  if (v?.image === "required" && gif)
+    problems.push("The image-to-video pair animates a still picture. To restyle a GIF, pick the text-to-video pair, Wan 2.2 5B or LTX-2.3.");
+  if (v?.image === "none" && source && !gif)
+    problems.push("This model makes video from text, or restyles an animated GIF. Turn off Start from an image, or pick the image-to-video model.");
   return problems;
 }
+
+/** An animated GIF to restyle, rather than a still picture to start from. */
+export const isAnimated = (img?: InputImage) => (img?.frames ?? 1) > 1;
 
 export function compile(
   s: Settings,

@@ -46,7 +46,7 @@ export function unavailable(profile: Profile | null, catalog: Catalog, controlne
   if (profile?.video) {
     const notVideo = "Not available for video yet.";
     return {
-      source: profile.video.image === "none" ? "This model makes video from text only. Pick the image-to-video model to start from a picture." : null,
+      source: null,
       hires: notVideo,
       upscale: notVideo,
       faceFix: notVideo,

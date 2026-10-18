@@ -5,7 +5,46 @@
 // ModelSamplingSD3 shift, and two KSamplerAdvanced nodes hand the latent from one to the other.
 
 import { PROFILES } from "./profiles";
-import { Graph, loadImage, nodeDefaults, resolve, withPrefix, type ApiWorkflow, type Destination, type Link, type NodeInfos, type Parts, type Settings } from "./workflow";
+import {
+  Graph,
+  isAnimated,
+  loadImage,
+  nodeDefaults,
+  resolve,
+  withPrefix,
+  type ApiWorkflow,
+  type Destination,
+  type InputImage,
+  type Link,
+  type NodeInfos,
+  type Parts,
+  type Settings,
+} from "./workflow";
+
+/** Video models take frame counts in steps of 4 (Wan) or 8 (LTX), plus one. */
+export const frameStep = (family: Settings["family"]) => (PROFILES[family].arch === "ltx23" ? 8 : 4);
+
+/** How many of a GIF's frames to restyle: up to the chosen length, rounded down to a count the model takes. */
+export function gifFrames(gif: InputImage, seconds: number, step: number): number {
+  const want = Math.min(gif.frames ?? 1, Math.max(1, Math.round(seconds * (gif.fps ?? 10))));
+  return Math.floor((want - 1) / step) * step + 1;
+}
+
+/** The GIF's frames, trimmed and scaled to the size being made, then encoded as a video latent. */
+function gifLatent(g: Graph, gif: InputImage, frames: number, width: number, height: number, vae: Link): Link {
+  const picked = g.add("ImageFromBatch", { image: [loadImage(g, gif), 0], batch_index: 0, length: frames });
+  const scaled = g.add("ImageScale", { image: [picked, 0], upscale_method: "lanczos", width, height, crop: "center" });
+  return [g.add("VAEEncode", { pixels: [scaled, 0], vae }), 0];
+}
+
+function saveGif(g: Graph, images: Link, fps: number, dest: Destination) {
+  g.add("FletchSaveGif", {
+    images,
+    fps,
+    folder: dest.folder ?? "",
+    filename_prefix: !dest.folder && dest.subfolder ? `${dest.subfolder}/fletch` : "fletch",
+  });
+}
 
 /** Which half of a Wan 2.2 14B pair a LoRA belongs to, from its name; "both" if it doesn't say. */
 export function loraTarget(name: string): "high" | "low" | "both" {
@@ -37,9 +76,12 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
   let NEGATIVE: Link = [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.negativePrefix, s.negative) }), 0];
 
   const start = s.addons?.source?.image;
+  const gif = isAnimated(start) ? start! : null;
   const size = { width: r.width, height: r.height, length: r.frames, batch_size: 1 };
   let LATENT: Link;
-  if (p.latent === "EmptyHunyuanLatentVideo") {
+  if (gif) {
+    LATENT = gifLatent(g, gif, gifFrames(gif, r.seconds, 4), r.width, r.height, VAE);
+  } else if (p.latent === "EmptyHunyuanLatentVideo") {
     LATENT = [g.add("EmptyHunyuanLatentVideo", size), 0];
   } else if (v.experts) {
     // 14B image to video: the start picture conditions both prompts and seeds the latent.
@@ -64,8 +106,27 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
   };
 
   const common = { cfg: r.cfg, sampler_name: r.sampler, scheduler: r.scheduler, positive: POSITIVE, negative: NEGATIVE };
+  // Restyling a GIF skips the first part of the schedule, like img2img: the more change, the earlier it starts.
+  const denoise = gif ? s.addons!.source!.strength : 1;
+  const skip = Math.min(r.steps - 1, Math.round(r.steps * (1 - denoise)));
   let SAMPLES: Link;
-  if (v.experts) {
+  if (v.experts && skip >= Math.floor(r.steps / 2)) {
+    // Little change asked for: only the low-noise model's half of the schedule is left.
+    SAMPLES = [
+      g.add("KSamplerAdvanced", {
+        model: model(parts.low, "low"),
+        add_noise: "enable",
+        noise_seed: s.seed,
+        steps: r.steps,
+        ...common,
+        latent_image: LATENT,
+        start_at_step: skip,
+        end_at_step: 10000,
+        return_with_leftover_noise: "disable",
+      }),
+      0,
+    ];
+  } else if (v.experts) {
     const split = Math.max(1, Math.floor(r.steps / 2));
     const first = g.add("KSamplerAdvanced", {
       model: model(parts.high, "high"),
@@ -74,7 +135,7 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
       steps: r.steps,
       ...common,
       latent_image: LATENT,
-      start_at_step: 0,
+      start_at_step: skip,
       end_at_step: split,
       return_with_leftover_noise: "enable",
     });
@@ -94,12 +155,16 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
     ];
   } else {
     SAMPLES = [
-      g.add("KSampler", { model: model(s.model.name, null), seed: s.seed, steps: r.steps, ...common, latent_image: LATENT, denoise: 1 }),
+      g.add("KSampler", { model: model(s.model.name, null), seed: s.seed, steps: r.steps, ...common, latent_image: LATENT, denoise }),
       0,
     ];
   }
 
   const frames: Link = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
+  if (gif) {
+    saveGif(g, frames, gif.fps!, dest);
+    return g.nodes;
+  }
   save(g, [g.add("CreateVideo", { ...nodeDefaults(nodes.CreateVideo), images: frames, fps: v.fps }), 0], nodes, dest);
   return g.nodes;
 }
@@ -128,6 +193,12 @@ export function findSpeedLoras(family: string, loraNames: string[]): { high: str
 const LTX_SIGMAS_FIRST = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0";
 const LTX_SIGMAS_REFINE = "0.85, 0.7250, 0.4219, 0.0";
 
+/** The distilled schedule from `change` down: start partway, keep the template's later steps. */
+export function ltxRestyleSigmas(change: number): string {
+  const rest = LTX_SIGMAS_FIRST.split(", ").map(Number).filter((x) => x < change);
+  return [Math.min(1, change), ...rest].map((x) => (Number.isInteger(x) ? x.toFixed(1) : String(x))).join(", ");
+}
+
 /**
  * LTX-2.3 makes video and sound together. Pass one samples a half-size video latent joined with
  * an audio latent; the video half is upscaled 2x and the pair is refined in a second pass. A start
@@ -146,6 +217,8 @@ export function compileLtx(s: Settings, parts: Parts, nodes: NodeInfos = {}, des
   for (const l of s.loras) if (l.name) MODEL = [g.add("LoraLoaderModelOnly", { model: MODEL, lora_name: l.name, strength_model: l.weight }), 0];
   const AUDIO_VAE: Link = [g.add("LTXVAudioVAELoader", { ckpt_name: ckpt }), 0];
   const CLIP: Link = [g.add("LTXAVTextEncoderLoader", { text_encoder: parts.gemma, ckpt_name: ckpt, device: "default" }), 0];
+  const start = s.addons?.source?.image;
+  if (isAnimated(start)) return ltxRestyle(g, s, start!, { MODEL, VAE, AUDIO_VAE, CLIP }, dest);
 
   const cond = g.add("LTXVConditioning", {
     positive: [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.positivePrefix, s.positive) }), 0],
@@ -154,7 +227,6 @@ export function compileLtx(s: Settings, parts: Parts, nodes: NodeInfos = {}, des
   });
   const [POSITIVE, NEGATIVE]: Link[] = [[cond, 0], [cond, 1]];
 
-  const start = s.addons?.source?.image;
   let picture: Link | null = null;
   if (start) {
     const scaled = g.add("ImageScale", { image: [loadImage(g, start), 0], upscale_method: "lanczos", width: r.width, height: r.height, crop: "center" });
@@ -211,5 +283,40 @@ export function compileLtx(s: Settings, parts: Parts, nodes: NodeInfos = {}, des
   ];
   const sound: Link = [g.add("LTXVAudioVAEDecode", { samples: [split2, 1], audio_vae: AUDIO_VAE }), 0];
   save(g, [g.add("CreateVideo", { ...nodeDefaults(nodes.CreateVideo), images: frames, audio: sound, fps: v.fps }), 0], nodes, dest);
+  return g.nodes;
+}
+
+/**
+ * LTX-2.3 video to video: the GIF's frames are encoded at full size and sampled once from
+ * partway down the distilled schedule, so the motion stays and the look follows the prompt.
+ */
+function ltxRestyle(g: Graph, s: Settings, gif: InputImage, m: { MODEL: Link; VAE: Link; AUDIO_VAE: Link; CLIP: Link }, dest: Destination): ApiWorkflow {
+  const p = PROFILES[s.family];
+  const r = resolve(s);
+  const fps = gif.fps!;
+  const frames = gifFrames(gif, r.seconds, 8);
+  const cond = g.add("LTXVConditioning", {
+    positive: [g.add("CLIPTextEncode", { clip: m.CLIP, text: withPrefix(p.positivePrefix, s.positive) }), 0],
+    negative: [g.add("CLIPTextEncode", { clip: m.CLIP, text: withPrefix(p.negativePrefix, s.negative) }), 0],
+    frame_rate: fps,
+  });
+  const audio: Link = [g.add("LTXVEmptyLatentAudio", { audio_vae: m.AUDIO_VAE, frames_number: frames, frame_rate: fps, batch_size: 1 }), 0];
+  const latent: Link = [
+    g.add("LTXVConcatAVLatent", { video_latent: gifLatent(g, gif, frames, r.width, r.height, m.VAE), audio_latent: audio }),
+    0,
+  ];
+  const sampled = g.add("SamplerCustomAdvanced", {
+    noise: [g.add("RandomNoise", { noise_seed: s.seed }), 0],
+    guider: [g.add("CFGGuider", { model: m.MODEL, positive: [cond, 0], negative: [cond, 1], cfg: r.cfg }), 0],
+    sampler: [g.add("KSamplerSelect", { sampler_name: r.sampler }), 0],
+    sigmas: [g.add("ManualSigmas", { sigmas: ltxRestyleSigmas(s.addons!.source!.strength) }), 0],
+    latent_image: latent,
+  });
+  const split = g.add("LTXVSeparateAVLatent", { av_latent: [sampled, 0] });
+  const images: Link = [
+    g.add("VAEDecodeTiled", { samples: [split, 0], vae: m.VAE, tile_size: 768, overlap: 64, temporal_size: 4096, temporal_overlap: 4 }),
+    0,
+  ];
+  saveGif(g, images, fps, dest);
   return g.nodes;
 }

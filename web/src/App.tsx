@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
 import { HistoryBar } from "./HistoryBar";
-import { findSpeedLoras } from "./video";
+import { findSpeedLoras, frameStep, gifFrames, ltxRestyleSigmas } from "./video";
 import { MaskPainter } from "./MaskPainter";
 import {
   connect,
@@ -27,6 +27,7 @@ import {
   compile,
   runProblems,
   pickParts,
+  isAnimated,
   randomSeed,
   resolve,
   type Advanced,
@@ -245,6 +246,7 @@ export function App() {
     choices.model && family ? runProblems({ model: choices.model, family, variant, addons: runAddons }, parts, current?.hasTextEncoders) : [];
   const speedLora =
     family && profile?.video?.experts && choices.quality === "fast" ? findSpeedLoras(family, loras.map((l) => l.name)) : undefined;
+  const gif = profile?.video && runAddons.source && isAnimated(runAddons.source.image) ? runAddons.source.image : undefined;
   const numbers = family
     ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons, seconds: choices.seconds, speedLora })
     : null;
@@ -425,7 +427,11 @@ export function App() {
           {numbers && profile && (
             <p className="muted small">
               Auto: {numbers.width} x {numbers.height}
-              {profile.video && `, ${numbers.seconds}s at ${profile.video.fps} fps`}, {numbers.steps} steps, CFG {numbers.cfg}
+              {profile.video &&
+                (gif
+                  ? `, restyling ${gifFrames(gif, numbers.seconds, frameStep(family!))} of the GIF's ${gif.frames} frames at ${gif.fps} fps`
+                  : `, ${numbers.seconds}s at ${profile.video.fps} fps`)}
+              , {gif && profile.arch === "ltx23" ? ltxRestyleSigmas(runAddons.source!.strength).split(",").length - 1 : numbers.steps} steps, CFG {numbers.cfg}
               {speedLora && " (4-step speed LoRAs)"}
               {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
               {profile.positivePrefix && ", adds quality tags"}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WAN_NEGATIVE } from "./profiles";
-import { loraTarget } from "./video";
+import { gifFrames, loraTarget, ltxRestyleSigmas } from "./video";
 import { base, byType, expectWellFormed, follow, one } from "./testutil";
 import { compile, partnerName, pickParts, resolve, runProblems, type Settings } from "./workflow";
 
@@ -62,7 +62,7 @@ describe("Wan 2.2 14B", () => {
     expect(runProblems({ ...t2v, family: "wan22_i2v" }, parts)).toEqual([
       "This model turns a picture into a video. Turn on Start from an image and add one.",
     ]);
-    expect(runProblems({ ...t2v, addons: { source: { image: start, strength: 1 } } }, parts)[0]).toMatch(/text only/);
+    expect(runProblems({ ...t2v, addons: { source: { image: start, strength: 1 } } }, parts)[0]).toMatch(/restyles an animated GIF/);
     expect(runProblems(t2v, { high: HIGH })).toEqual([
       "Add the UMT5 text encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors) to models/text_encoders.",
       "Add the Wan VAE (wan_2.1_vae.safetensors) to models/vae.",
@@ -186,5 +186,62 @@ describe("LTX-2.3", () => {
     expect(problems).toHaveLength(4);
     expect(problems[0]).toMatch(/models\/checkpoints/);
     expect(runProblems(ltx, ltxParts)).toEqual([]);
+  });
+});
+
+describe("GIF to GIF", () => {
+  const gif = { name: "fletch/dance.gif", width: 480, height: 270, frames: 40, fps: 10 };
+  const restyle = (family: Settings["family"], model: Settings["model"], strength = 0.6): Settings => ({
+    ...t2v, family, model, addons: { source: { image: gif, strength } },
+  });
+
+  it("uses as many frames as the model takes, up to the chosen length", () => {
+    expect(gifFrames(gif, 5, 4)).toBe(37);
+    expect(gifFrames(gif, 2, 4)).toBe(17);
+    expect(gifFrames(gif, 5, 8)).toBe(33);
+  });
+
+  it("restyles with the Wan text-to-video pair, skipping into the schedule, and saves a GIF at the GIF's speed", () => {
+    const wf = compile(restyle("wan22_t2v", t2v.model), parts, undefined, {}, { subfolder: "clips" });
+    expectWellFormed(wf);
+    expect(one(wf, "ImageFromBatch")[1].inputs).toMatchObject({ batch_index: 0, length: 37 });
+    expect(one(wf, "ImageScale")[1].inputs).toMatchObject({ width: 832, height: 512, crop: "center" });
+    expect(byType(wf, "EmptyHunyuanLatentVideo")).toHaveLength(0);
+    const [first, second] = byType(wf, "KSamplerAdvanced").map(([, n]) => n.inputs);
+    expect(follow(wf, first.latent_image).class_type).toBe("VAEEncode");
+    expect(first).toMatchObject({ start_at_step: 8, end_at_step: 10 });
+    expect(second).toMatchObject({ start_at_step: 10 });
+    expect(one(wf, "FletchSaveGif")[1].inputs).toMatchObject({ fps: 10, folder: "", filename_prefix: "clips/fletch" });
+    // A light touch leaves only the low-noise half.
+    const light = byType(compile(restyle("wan22_t2v", t2v.model, 0.3), parts), "KSamplerAdvanced");
+    expect(light).toHaveLength(1);
+    expect(light[0][1].inputs).toMatchObject({ add_noise: "enable", start_at_step: 14 });
+    expect(follow(compile(restyle("wan22_t2v", t2v.model, 0.3), parts), follow(compile(restyle("wan22_t2v", t2v.model, 0.3), parts), light[0][1].inputs.model).inputs.model).inputs.unet_name).toBe(LOW);
+  });
+
+  it("restyles with Wan 5B using denoise", () => {
+    const wf = compile(restyle("wan22_5b", { folder: "diffusion_models", name: "wan2.2_ti2v_5B_fp16.safetensors" }), { umt5: parts.umt5, vae: "wan2.2_vae.safetensors" });
+    expectWellFormed(wf);
+    expect(one(wf, "KSampler")[1].inputs.denoise).toBe(0.6);
+    expect(byType(wf, "Wan22ImageToVideoLatent")).toHaveLength(0);
+  });
+
+  it("restyles with LTX-2.3 in one pass from partway down its schedule", () => {
+    const ltxParts = { gemma: "gemma_3_12B_it_fp4_mixed.safetensors", distillLora: "ltx_2.3_distilled_lora.safetensors", upscaler: "ltx-2.3-spatial-upscaler-x2-1.1.safetensors" };
+    const wf = compile(restyle("ltx23", { folder: "checkpoints", name: "ltx-2.3-22b-dev-fp8.safetensors" }), ltxParts, undefined, {}, { folder: "D:/Gifs" });
+    expectWellFormed(wf);
+    expect(one(wf, "ImageFromBatch")[1].inputs.length).toBe(33);
+    expect(one(wf, "ManualSigmas")[1].inputs.sigmas).toBe("0.6, 0.421875, 0.0");
+    expect(one(wf, "LTXVConditioning")[1].inputs.frame_rate).toBe(10);
+    expect(byType(wf, "LTXVLatentUpsampler")).toHaveLength(0);
+    expect(one(wf, "FletchSaveGif")[1].inputs).toMatchObject({ folder: "D:/Gifs", fps: 10 });
+    expect(ltxRestyleSigmas(1)).toBe("1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0");
+  });
+
+  it("says when a GIF doesn't fit the model", () => {
+    const i2v = restyle("wan22_i2v", t2v.model);
+    expect(runProblems(i2v, parts)[0]).toMatch(/animates a still picture/);
+    expect(runProblems({ ...base, addons: { source: { image: gif, strength: 0.6 } } }, {})[0]).toMatch(/Animated GIFs work with the video models/);
+    expect(runProblems(restyle("wan22_t2v", t2v.model), parts)).toEqual([]);
   });
 });

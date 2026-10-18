@@ -2,7 +2,7 @@ import { useState } from "react";
 import { inputImageUrl, uploadImage, type Catalog, type LoraInfo } from "./comfy";
 import { controlnetsFor, faceDetectors, GUIDE_MODES, guideModeAvailable, type AddonChoices, type AddonKey } from "./addons";
 import type { Profile } from "./profiles";
-import type { InputImage } from "./workflow";
+import { isAnimated, type InputImage } from "./workflow";
 
 function Toggle(props: { label: string; on: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
   return (
@@ -88,8 +88,16 @@ export function AddonCards(props: {
             onImage={(image) => set("source", { image, masked: undefined })}
             onError={props.onError}
           />
-          {a.source.image && props.profile?.video && (
-            <p className="muted small note">The video starts from this picture.</p>
+          {a.source.image && props.profile?.video && isAnimated(a.source.image) && (
+            <>
+              <Slider label="Change" value={a.source.strength} min={0.05} max={1} step={0.05} onChange={(strength) => set("source", { strength })} />
+              <p className="muted small note">Fletch restyles this GIF's frames with your prompt and saves a GIF.</p>
+            </>
+          )}
+          {a.source.image && props.profile?.video && !isAnimated(a.source.image) && (
+            <p className="muted small note">
+              {props.profile.video.image === "none" ? "This model can restyle an animated GIF, but not start from a still picture." : "The video starts from this picture."}
+            </p>
           )}
           {a.source.image && !props.profile?.video && (
             <>

@@ -96,7 +96,11 @@ export function AddonCards(props: {
           )}
           {a.source.image && props.profile?.video && !isAnimated(a.source.image) && (
             <p className="muted small note">
-              {props.profile.video.image === "none" ? "This model can restyle an animated GIF, but not start from a still picture." : "The video starts from this picture."}
+              {/\.gif$/i.test(a.source.image.name)
+                ? "Fletch could only read one frame of this GIF, so it treats it as a still picture. Send this GIF to Claude so the reader can be fixed."
+                : props.profile.video.image === "none"
+                  ? "This model can restyle an animated GIF, but not start from a still picture."
+                  : "The video starts from this picture."}
             </p>
           )}
           {a.source.image && !props.profile?.video && (

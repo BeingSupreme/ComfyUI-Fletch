@@ -43,3 +43,24 @@ export function gifInfo(data: ArrayBuffer): GifInfo | null {
   if (!frames) return null;
   return { frames, fps: Math.round((frames * 100 * 100) / hundredths) / 100 };
 }
+
+/** Second opinion from the browser's own decoder (Chrome, Edge, newer Firefox), for GIFs the block reader can't follow. */
+export async function decodeGifInfo(file: Blob): Promise<GifInfo | null> {
+  const Decoder = (globalThis as { ImageDecoder?: new (init: { data: ReadableStream; type: string }) => any }).ImageDecoder;
+  if (!Decoder) return null;
+  try {
+    const decoder = new Decoder({ data: file.stream(), type: "image/gif" });
+    await decoder.tracks.ready;
+    const frames: number = decoder.tracks.selectedTrack.frameCount;
+    let micros = 0;
+    for (let i = 0; i < frames; i++) {
+      const { image } = await decoder.decode({ frameIndex: i });
+      micros += image.duration || 100_000;
+      image.close();
+    }
+    decoder.close();
+    return frames > 1 ? { frames, fps: Math.round((frames * 1e8) / micros) / 100 } : null;
+  } catch {
+    return null;
+  }
+}

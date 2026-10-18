@@ -57,6 +57,10 @@ button:disabled { opacity: 0.5; cursor: default; }
   border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden;
 }
 .preview img, .preview video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.grid { position: absolute; inset: 0; display: grid; gap: 6px; padding: 6px; align-content: center; }
+.grid img, .grid .cell { position: static; width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 6px; cursor: pointer; display: grid; place-items: center; }
+.grid .cell { border: 1px dashed var(--border); cursor: default; }
+.grid img.pending { opacity: 0.6; cursor: default; }
 .progress { position: absolute; left: 16px; right: 16px; bottom: 16px; }
 .bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 4px; }
 .bar div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.2s; }

@@ -63,7 +63,12 @@ function lastFrame(url: string): Promise<Blob> {
 
 const isVideo = (nameOrUrl: string) => /\.(mp4|webm|mkv|mov)(&|$)/i.test(nameOrUrl);
 
-type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
+type Status =
+  | { kind: "idle" }
+  | { kind: "running"; step: number; of: number; item: number; items: number }
+  | { kind: "error"; message: string };
+
+const BATCHES = [1, 2, 4, 6, 9];
 
 interface HistoryEntry {
   image: ImageRef;
@@ -89,6 +94,8 @@ interface Choices {
   addons: AddonChoices;
   /** Video length in seconds. */
   seconds: number;
+  /** Images per run (image models): each gets the next seed. */
+  batch: number;
 }
 
 const DEFAULT_CHOICES: Choices = {
@@ -103,6 +110,7 @@ const DEFAULT_CHOICES: Choices = {
   seed: null,
   addons: DEFAULT_ADDONS,
   seconds: 5,
+  batch: 1,
 };
 
 /** Saved choices from an older version may lack newer fields; fill them from the defaults. */
@@ -174,6 +182,9 @@ export function App() {
   const [preview, setPreview] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(() => load("history", []));
   const [selected, setSelected] = useState<HistoryEntry | null>(null);
+  /** The last batch run (more than one image), shown as a grid until one is picked. */
+  const [grid, setGrid] = useState<{ size: number; entries: HistoryEntry[] } | null>(null);
+  const [showGrid, setShowGrid] = useState(false);
   const [output, setOutput] = useState<OutputFolder | null>(null);
   useEffect(() => {
     getOutputFolder().then(setOutput, () => setOutput(null));
@@ -273,26 +284,37 @@ export function App() {
   async function generate() {
     const settings = settingsForRun();
     if (!settings || !numbers) return;
-    setStatus({ kind: "running", step: 0, of: numbers.steps });
+    // A batch is the same run queued again with the next seeds, so each image keeps a seed it can be remade from.
+    const size = profile?.video ? 1 : choices.batch;
+    const runs = Array.from({ length: size }, (_, i) => ({ ...settings, seed: settings.seed + i }));
+    setStatus({ kind: "running", step: 0, of: numbers.steps, item: 1, items: size });
     setPreview(null);
     setSelected(null);
+    setGrid(size > 1 ? { size, entries: [] } : null);
+    setShowGrid(size > 1);
     try {
-      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders, catalog.nodes, destination(output)), { fletch: settings });
-      const stop = watch(id, (e) => {
-        if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
-        else if (e.kind === "preview") setPreview(e.url);
-        else if (e.kind === "image") {
-          const entry = { image: e.image, settings, familyOverridden: !!overrides[modelKey(settings.model)] };
-          setPreview(imageUrl(e.image));
-          setSelected(entry);
-          setHistory((h) => [entry, ...h].slice(0, 40));
-        } else if (e.kind === "error") {
-          setStatus({ kind: "error", message: e.message });
-          stop();
-        } else if (e.kind === "done") {
-          setStatus({ kind: "idle" });
-          stop();
-        }
+      const familyOverridden = !!overrides[modelKey(settings.model)];
+      const ids = [];
+      for (const run of runs) ids.push(await queuePrompt(compile(run, parts, current?.hasTextEncoders, catalog.nodes, destination(output)), { fletch: run }));
+      let finished = 0;
+      ids.forEach((id, i) => {
+        const stop = watch(id, (e) => {
+          if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max, item: i + 1, items: size });
+          else if (e.kind === "preview") setPreview(e.url);
+          else if (e.kind === "image") {
+            const entry = { image: e.image, settings: runs[i], familyOverridden };
+            setPreview(imageUrl(e.image));
+            setSelected(entry);
+            setHistory((h) => [entry, ...h].slice(0, 40));
+            if (size > 1) setGrid((g) => (g ? { ...g, entries: [...g.entries, entry] } : g));
+          } else if (e.kind === "error") {
+            setStatus({ kind: "error", message: e.message });
+            stop();
+          } else if (e.kind === "done") {
+            stop();
+            if (++finished === size) setStatus((s) => (s.kind === "error" ? s : { kind: "idle" }));
+          }
+        });
       });
     } catch (e) {
       setStatus({ kind: "error", message: String((e as Error).message ?? e) });
@@ -460,6 +482,13 @@ export function App() {
           )}
         </section>
 
+        {profile && !profile.video && (
+          <section>
+            <span className="label">Batch</span>
+            <Chips options={BATCHES.map((n) => [n, String(n)] as [number, string])} value={choices.batch} onChange={(batch) => update({ batch })} />
+          </section>
+        )}
+
         {profile?.video && numbers && (
           <section>
             <span className="label">Length</span>
@@ -620,7 +649,28 @@ export function App() {
         </div>
 
         <div className="preview">
-          {preview ? (
+          {grid && showGrid ? (
+            <div className="grid" style={{ gridTemplateColumns: `repeat(${Math.ceil(Math.sqrt(grid.size))}, minmax(0, 1fr))` }}>
+              {Array.from({ length: grid.size }, (_, i) => {
+                const entry = grid.entries[i];
+                if (entry)
+                  return (
+                    <img
+                      key={i}
+                      src={imageUrl(entry.image)}
+                      alt={`Result ${i + 1}`}
+                      onClick={() => {
+                        setSelected(entry);
+                        setPreview(imageUrl(entry.image));
+                        setShowGrid(false);
+                      }}
+                    />
+                  );
+                const live = running && i === grid.entries.length && preview;
+                return live ? <img key={i} src={preview} alt="" className="pending" /> : <span key={i} className="cell muted small">{running ? "Waiting…" : ""}</span>;
+              })}
+            </div>
+          ) : preview ? (
             isVideo(preview) ? (
               <video src={preview} autoPlay loop muted controls playsInline />
             ) : (
@@ -631,7 +681,9 @@ export function App() {
           )}
           {running && (
             <div className="progress">
-              <span className="small muted">Step {status.step} of {status.of}</span>
+              <span className="small muted">
+                {status.items > 1 && `Image ${status.item} of ${status.items}, `}Step {status.step} of {status.of}
+              </span>
               <div className="bar">
                 <div style={{ width: `${(100 * status.step) / Math.max(status.of, 1)}%` }} />
               </div>
@@ -646,6 +698,9 @@ export function App() {
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
             <span className="actions">
+              {grid && !showGrid && grid.entries.includes(selected) && (
+                <button className="link" onClick={() => setShowGrid(true)}>Back to the grid</button>
+              )}
               {isVideo(selected.image.filename) ? (
                 <button className="link" onClick={() => continueFrom(selected)}>Continue from last frame</button>
               ) : (
@@ -664,6 +719,7 @@ export function App() {
             setHistory([]);
             setSelected(null);
             setPreview(null);
+            setGrid(null);
           }}
           onError={(message) => setStatus({ kind: "error", message })}
         />
@@ -677,6 +733,7 @@ export function App() {
                 onClick: () => {
                   setPreview(imageUrl(h.image));
                   setSelected(h);
+                  setShowGrid(false);
                 },
               };
               return isVideo(h.image.filename) ? <video {...props} muted preload="metadata" /> : <img {...props} alt="" />;

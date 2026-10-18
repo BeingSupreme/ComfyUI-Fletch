@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
+import { ZoomImage } from "./ZoomImage";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
 import { HistoryBar } from "./HistoryBar";
+import { findSpeedLoras, frameStep, gifFrames, ltxRestyleSigmas } from "./video";
 import { MaskPainter } from "./MaskPainter";
 import {
   connect,
@@ -24,8 +26,9 @@ import { FAMILIES, isFamily, PROFILES, UNSUPPORTED, type Family, type Quality, t
 import { load, save } from "./store";
 import {
   compile,
-  modelProblems,
+  runProblems,
   pickParts,
+  isAnimated,
   randomSeed,
   resolve,
   type Advanced,
@@ -39,7 +42,34 @@ import {
 const destination = (o: OutputFolder | null): Destination =>
   !o ? {} : o.inside_output ? { subfolder: o.subfolder || undefined } : { folder: o.path };
 
-type Status = { kind: "idle" } | { kind: "running"; step: number; of: number } | { kind: "error"; message: string };
+/** The final frame of a video, as a PNG. */
+function lastFrame(url: string): Promise<Blob> {
+  return new Promise((done, fail) => {
+    const v = document.createElement("video");
+    v.muted = true;
+    v.preload = "auto";
+    v.onerror = () => fail(new Error("Couldn't read the video's last frame."));
+    v.onloadedmetadata = () => {
+      v.currentTime = Math.max(0, v.duration - 0.01);
+    };
+    v.onseeked = () => {
+      const c = document.createElement("canvas");
+      [c.width, c.height] = [v.videoWidth, v.videoHeight];
+      c.getContext("2d")!.drawImage(v, 0, 0);
+      c.toBlob((b) => (b ? done(b) : fail(new Error("Couldn't read the video's last frame."))), "image/png");
+    };
+    v.src = url;
+  });
+}
+
+const isVideo = (nameOrUrl: string) => /\.(mp4|webm|mkv|mov)(&|$)/i.test(nameOrUrl);
+
+type Status =
+  | { kind: "idle" }
+  | { kind: "running"; step: number; of: number; item: number; items: number }
+  | { kind: "error"; message: string };
+
+const BATCHES = [1, 2, 4, 6, 9];
 
 interface HistoryEntry {
   image: ImageRef;
@@ -63,6 +93,10 @@ interface Choices {
   /** Fixed seed, or null for a new random seed every run. */
   seed: number | null;
   addons: AddonChoices;
+  /** Video length in seconds. */
+  seconds: number;
+  /** Images per run (image models): each gets the next seed. */
+  batch: number;
 }
 
 const DEFAULT_CHOICES: Choices = {
@@ -76,6 +110,8 @@ const DEFAULT_CHOICES: Choices = {
   advanced: {},
   seed: null,
   addons: DEFAULT_ADDONS,
+  seconds: 5,
+  batch: 1,
 };
 
 /** Saved choices from an older version may lack newer fields; fill them from the defaults. */
@@ -92,6 +128,7 @@ const EMPTY_CATALOG: Catalog = {
   diffusionModels: [],
   textEncoders: [],
   vaes: [],
+  latentUpscalers: [],
   samplers: [],
   schedulers: [],
   upscaleModels: [],
@@ -104,7 +141,7 @@ const modelKey = (m: { folder: string; name: string }) => `${m.folder}:${m.name}
 const SHAPES: [Shape, string][] = [["square", "Square"], ["portrait", "Portrait"], ["wide", "Wide"]];
 const QUALITIES: [Quality, string][] = [["fast", "Fast"], ["balanced", "Balanced"], ["best", "Best"]];
 
-function Chips<T extends string>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
+function Chips<T extends string | number>(props: { options: [T, string][]; value: T; onChange: (v: T) => void }) {
   return (
     <div className="chips">
       {props.options.map(([v, label]) => (
@@ -146,6 +183,9 @@ export function App() {
   const [preview, setPreview] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(() => load("history", []));
   const [selected, setSelected] = useState<HistoryEntry | null>(null);
+  /** The last batch run (more than one image), shown as a grid until one is picked. */
+  const [grid, setGrid] = useState<{ size: number; entries: HistoryEntry[] } | null>(null);
+  const [showGrid, setShowGrid] = useState(false);
   const [output, setOutput] = useState<OutputFolder | null>(null);
   useEffect(() => {
     getOutputFolder().then(setOutput, () => setOutput(null));
@@ -199,18 +239,28 @@ export function App() {
   const current = detected?.key === key ? detected : null;
   const variant = current?.variant ?? null;
   const parts = useMemo(
-    () => (family ? pickParts(family, variant, catalog.textEncoders, catalog.vaes) : {}),
-    [family, variant, catalog],
+    () =>
+      family
+        ? pickParts(family, variant, catalog.textEncoders, catalog.vaes, choices.model?.name, catalog.diffusionModels, {
+            loras: loras.map((l) => l.name),
+            latentUpscalers: catalog.latentUpscalers,
+          })
+        : {},
+    [family, variant, catalog, choices.model?.name, loras],
   );
-  const problems = choices.model && family ? modelProblems({ model: choices.model, family, variant }, parts, current?.hasTextEncoders) : [];
   const compatibleLoras = profile ? loras.filter((l) => l.family === profile.loraBase) : [];
   const unknownLoras = loras.filter((l) => l.family === null);
   const usableLoras = new Set([...compatibleLoras, ...unknownLoras].map((l) => l.name));
   const blocked = unavailable(profile, catalog, controlnets);
   const usableControlnets = new Set(profile ? controlnetsFor(profile, controlnets).map((c) => c.name) : []);
   const runAddons = addonsForRun(choices.addons, blocked, catalog, usableControlnets);
+  const problems =
+    choices.model && family ? runProblems({ model: choices.model, family, variant, addons: runAddons }, parts, current?.hasTextEncoders) : [];
+  const speedLora =
+    family && profile?.video?.experts && choices.quality === "fast" ? findSpeedLoras(family, loras.map((l) => l.name)) : undefined;
+  const gif = profile?.video && runAddons.source && isAnimated(runAddons.source.image) ? runAddons.source.image : undefined;
   const numbers = family
-    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons })
+    ? resolve({ family, shape: choices.shape, quality: choices.quality, advanced, addons: runAddons, seconds: choices.seconds, speedLora })
     : null;
 
   function settingsForRun(): Settings | null {
@@ -228,32 +278,44 @@ export function App() {
       seed: choices.seed ?? randomSeed(),
       advanced,
       addons: runAddons,
+      ...(profile?.video ? { seconds: numbers?.seconds, speedLora } : {}),
     };
   }
 
   async function generate() {
     const settings = settingsForRun();
     if (!settings || !numbers) return;
-    setStatus({ kind: "running", step: 0, of: numbers.steps });
+    // A batch is the same run queued again with the next seeds, so each image keeps a seed it can be remade from.
+    const size = profile?.video ? 1 : choices.batch;
+    const runs = Array.from({ length: size }, (_, i) => ({ ...settings, seed: settings.seed + i }));
+    setStatus({ kind: "running", step: 0, of: numbers.steps, item: 1, items: size });
     setPreview(null);
     setSelected(null);
+    setGrid(size > 1 ? { size, entries: [] } : null);
+    setShowGrid(size > 1);
     try {
-      const id = await queuePrompt(compile(settings, parts, current?.hasTextEncoders, catalog.nodes, destination(output)), { fletch: settings });
-      const stop = watch(id, (e) => {
-        if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max });
-        else if (e.kind === "preview") setPreview(e.url);
-        else if (e.kind === "image") {
-          const entry = { image: e.image, settings, familyOverridden: !!overrides[modelKey(settings.model)] };
-          setPreview(imageUrl(e.image));
-          setSelected(entry);
-          setHistory((h) => [entry, ...h].slice(0, 40));
-        } else if (e.kind === "error") {
-          setStatus({ kind: "error", message: e.message });
-          stop();
-        } else if (e.kind === "done") {
-          setStatus({ kind: "idle" });
-          stop();
-        }
+      const familyOverridden = !!overrides[modelKey(settings.model)];
+      const ids = [];
+      for (const run of runs) ids.push(await queuePrompt(compile(run, parts, current?.hasTextEncoders, catalog.nodes, destination(output)), { fletch: run }));
+      let finished = 0;
+      ids.forEach((id, i) => {
+        const stop = watch(id, (e) => {
+          if (e.kind === "progress") setStatus({ kind: "running", step: e.value, of: e.max, item: i + 1, items: size });
+          else if (e.kind === "preview") setPreview(e.url);
+          else if (e.kind === "image") {
+            const entry = { image: e.image, settings: runs[i], familyOverridden };
+            setPreview(imageUrl(e.image));
+            setSelected(entry);
+            setHistory((h) => [entry, ...h].slice(0, 40));
+            if (size > 1) setGrid((g) => (g ? { ...g, entries: [...g.entries, entry] } : g));
+          } else if (e.kind === "error") {
+            setStatus({ kind: "error", message: e.message });
+            stop();
+          } else if (e.kind === "done") {
+            stop();
+            if (++finished === size) setStatus((s) => (s.kind === "error" ? s : { kind: "idle" }));
+          }
+        });
       });
     } catch (e) {
       setStatus({ kind: "error", message: String((e as Error).message ?? e) });
@@ -274,12 +336,14 @@ export function App() {
       loras: s.loras.length ? s.loras : c.loras,
       advanced: s.advanced,
       advancedFor: s.family,
+      seconds: s.seconds ?? c.seconds,
       seed: s.seed,
       addons: {
         source: { ...c.addons.source, on: !!s.addons?.source, ...s.addons?.source },
         hires: { ...c.addons.hires, on: !!s.addons?.hires, ...s.addons?.hires },
         upscale: { ...c.addons.upscale, on: !!s.addons?.upscale, ...s.addons?.upscale },
         faceFix: { ...c.addons.faceFix, on: !!s.addons?.faceFix, ...s.addons?.faceFix },
+        faceSwap: { ...c.addons.faceSwap, on: !!s.addons?.faceSwap, ...s.addons?.faceSwap },
         guide: { ...c.addons.guide, on: !!s.addons?.guide, ...s.addons?.guide },
       },
     }));
@@ -290,6 +354,17 @@ export function App() {
     try {
       const blob = await (await fetch(imageUrl(entry.image))).blob();
       setAddon("source", { on: true, image: await uploadImage(blob, entry.image.filename), masked: undefined });
+    } catch (e) {
+      setStatus({ kind: "error", message: String((e as Error).message ?? e) });
+    }
+  }
+
+  /** Chain clips: the last frame of a finished video becomes the start picture for the next. */
+  async function continueFrom(entry: HistoryEntry) {
+    try {
+      const blob = await lastFrame(imageUrl(entry.image));
+      const name = entry.image.filename.replace(/\.[^.]+$/, "") + "-last.png";
+      setAddon("source", { on: true, image: await uploadImage(blob, name), masked: undefined });
     } catch (e) {
       setStatus({ kind: "error", message: String((e as Error).message ?? e) });
     }
@@ -375,7 +450,13 @@ export function App() {
           )}
           {numbers && profile && (
             <p className="muted small">
-              Auto: {numbers.width} x {numbers.height}, {numbers.steps} steps, CFG {numbers.cfg}
+              Auto: {numbers.width} x {numbers.height}
+              {profile.video &&
+                (gif
+                  ? `, ${runAddons.source!.output === "sound" ? "adding sound to" : "restyling"} ${gifFrames(gif, numbers.seconds, frameStep(family!))} of the GIF's ${gif.frames} frames at ${gif.fps} fps`
+                  : `, ${numbers.seconds}s at ${profile.video.fps} fps`)}
+              , {gif && profile.arch === "ltx23" ? (runAddons.source!.output === "sound" ? 8 : ltxRestyleSigmas(runAddons.source!.strength).split(",").length - 1) : numbers.steps} steps, CFG {numbers.cfg}
+              {speedLora && " (4-step speed LoRAs)"}
               {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
               {profile.positivePrefix && ", adds quality tags"}
             </p>
@@ -402,10 +483,30 @@ export function App() {
           )}
         </section>
 
-        <section>
-          <span className="label">Quality</span>
-          <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
-        </section>
+        {profile && !profile.video && (
+          <section>
+            <span className="label">Batch</span>
+            <Chips options={BATCHES.map((n) => [n, String(n)] as [number, string])} value={choices.batch} onChange={(batch) => update({ batch })} />
+          </section>
+        )}
+
+        {profile?.video && numbers && (
+          <section>
+            <span className="label">Length</span>
+            <Chips
+              options={profile.video.seconds.map((n) => [n, `${n} sec`] as [number, string])}
+              value={numbers.seconds}
+              onChange={(seconds) => update({ seconds })}
+            />
+          </section>
+        )}
+
+        {!profile?.fixedSchedule && (
+          <section>
+            <span className="label">Quality</span>
+            <Chips options={QUALITIES} value={choices.quality} onChange={(quality) => update({ quality, advanced: { ...advanced, steps: undefined }, advancedFor: family })} />
+          </section>
+        )}
 
         <section>
           <span className="label">Add-ons</span>
@@ -469,49 +570,53 @@ export function App() {
         <details>
           <summary>Advanced</summary>
           <div className="advanced">
-            <label>
-              <span className="label">Steps</span>
-              <input
-                inputMode="numeric" placeholder={numbers ? String(profile!.steps[choices.quality]) : ""}
-                value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">CFG</span>
-              <input
-                inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
-                value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
-              />
-            </label>
-            <label>
-              <span className="label">Sampler</span>
-              <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
-                <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
-                {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Scheduler</span>
-              <select
-                value={advanced.scheduler ?? ""}
-                disabled={profile?.arch === "flux2"}
-                onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
-              >
-                <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
-                {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </label>
-            <label>
-              <span className="label">Clip skip</span>
-              <select
-                value={advanced.clipSkip ?? ""}
-                onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
-              >
-                <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
-                <option value="1">1</option>
-                <option value="2">2</option>
-              </select>
-            </label>
+            {!profile?.fixedSchedule && (
+              <>
+                <label>
+                  <span className="label">Steps</span>
+                  <input
+                    inputMode="numeric" placeholder={numbers ? String(speedLora ? 4 : profile!.steps[choices.quality]) : ""}
+                    value={advanced.steps ?? ""} onChange={(e) => setAdvanced({ steps: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">CFG</span>
+                  <input
+                    inputMode="decimal" placeholder={profile ? String(profile.cfg) : ""}
+                    value={advanced.cfg ?? ""} onChange={(e) => setAdvanced({ cfg: numberOrUndefined(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span className="label">Sampler</span>
+                  <select value={advanced.sampler ?? ""} onChange={(e) => setAdvanced({ sampler: e.target.value || undefined })}>
+                    <option value="">Auto{profile ? ` (${profile.sampler})` : ""}</option>
+                    {catalog.samplers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Scheduler</span>
+                  <select
+                    value={advanced.scheduler ?? ""}
+                    disabled={profile?.arch === "flux2"}
+                    onChange={(e) => setAdvanced({ scheduler: e.target.value || undefined })}
+                  >
+                    <option value="">{profile?.arch === "flux2" ? "Flux 2 schedule" : `Auto${profile ? ` (${profile.scheduler})` : ""}`}</option>
+                    {catalog.schedulers.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className="label">Clip skip</span>
+                  <select
+                    value={advanced.clipSkip ?? ""}
+                    onChange={(e) => setAdvanced({ clipSkip: numberOrUndefined(e.target.value) })}
+                  >
+                    <option value="">Auto{profile ? ` (${profile.clipSkip})` : ""}</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                  </select>
+                </label>
+              </>
+            )}
             <label>
               <span className="label">Seed</span>
               <input
@@ -545,10 +650,41 @@ export function App() {
         </div>
 
         <div className="preview">
-          {preview ? <img src={preview} alt="Latest result" /> : <span className="muted">Your image appears here</span>}
+          {grid && showGrid ? (
+            <div className="grid" style={{ gridTemplateColumns: `repeat(${Math.ceil(Math.sqrt(grid.size))}, minmax(0, 1fr))` }}>
+              {Array.from({ length: grid.size }, (_, i) => {
+                const entry = grid.entries[i];
+                if (entry)
+                  return (
+                    <img
+                      key={i}
+                      src={imageUrl(entry.image)}
+                      alt={`Result ${i + 1}`}
+                      onClick={() => {
+                        setSelected(entry);
+                        setPreview(imageUrl(entry.image));
+                        setShowGrid(false);
+                      }}
+                    />
+                  );
+                const live = running && i === grid.entries.length && preview;
+                return live ? <img key={i} src={preview} alt="" className="pending" /> : <span key={i} className="cell muted small">{running ? "Waiting…" : ""}</span>;
+              })}
+            </div>
+          ) : preview ? (
+            isVideo(preview) ? (
+              <video src={preview} autoPlay loop muted controls playsInline />
+            ) : (
+              <ZoomImage src={preview} alt="Latest result" />
+            )
+          ) : (
+            <span className="muted">Your {profile?.video ? "video" : "image"} appears here</span>
+          )}
           {running && (
             <div className="progress">
-              <span className="small muted">Step {status.step} of {status.of}</span>
+              <span className="small muted">
+                {status.items > 1 && `Image ${status.item} of ${status.items}, `}Step {status.step} of {status.of}
+              </span>
               <div className="bar">
                 <div style={{ width: `${(100 * status.step) / Math.max(status.of, 1)}%` }} />
               </div>
@@ -563,7 +699,14 @@ export function App() {
               {selected.settings.loras.length > 0 && `, ${selected.settings.loras.length} LoRA`}
             </span>
             <span className="actions">
-              <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              {grid && !showGrid && grid.entries.includes(selected) && (
+                <button className="link" onClick={() => setShowGrid(true)}>Back to the grid</button>
+              )}
+              {isVideo(selected.image.filename) ? (
+                <button className="link" onClick={() => continueFrom(selected)}>Continue from last frame</button>
+              ) : (
+                <button className="link" onClick={() => startFrom(selected)}>Start from this image</button>
+              )}
               <button className="link" onClick={() => reuse(selected)}>Use these settings</button>
             </span>
           </div>
@@ -577,23 +720,25 @@ export function App() {
             setHistory([]);
             setSelected(null);
             setPreview(null);
+            setGrid(null);
           }}
           onError={(message) => setStatus({ kind: "error", message })}
         />
         {history.length > 0 && (
           <div className="history">
-            {history.map((h) => (
-              <img
-                key={`${h.image.subfolder}/${h.image.filename}`}
-                src={imageUrl(h.image)}
-                alt=""
-                className={selected === h ? "on" : ""}
-                onClick={() => {
+            {history.map((h) => {
+              const props = {
+                key: `${h.image.subfolder}/${h.image.filename}`,
+                src: imageUrl(h.image),
+                className: selected === h ? "on" : "",
+                onClick: () => {
                   setPreview(imageUrl(h.image));
                   setSelected(h);
-                }}
-              />
-            ))}
+                  setShowGrid(false);
+                },
+              };
+              return isVideo(h.image.filename) ? <video {...props} muted preload="metadata" /> : <img {...props} alt="" />;
+            })}
           </div>
         )}
       </main>

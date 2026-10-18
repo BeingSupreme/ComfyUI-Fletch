@@ -1,85 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { compile, modelProblems, nodeDefaults, pickParts, resolve, sizeFor, type ApiWorkflow, type Link, type Settings } from "./workflow";
-
-const base: Settings = {
-  model: { folder: "checkpoints", name: "juggernautXL.safetensors" },
-  family: "sdxl",
-  positive: "a red fox in snow",
-  negative: "blurry",
-  shape: "square",
-  quality: "balanced",
-  loras: [],
-  seed: 42,
-  advanced: {},
-};
-
-const fluxParts = { t5: "t5xxl_fp8_e4m3fn.safetensors", clipL: "clip_l.safetensors", vae: "ae.safetensors" };
-
-// Output counts per node class, to check every link lands on a real output.
-const OUTPUTS: Record<string, number> = {
-  CheckpointLoaderSimple: 3,
-  UNETLoader: 1,
-  DualCLIPLoader: 1,
-  VAELoader: 1,
-  LoraLoader: 2,
-  LoraLoaderModelOnly: 1,
-  CLIPSetLastLayer: 1,
-  CLIPTextEncode: 1,
-  FluxGuidance: 1,
-  EmptyLatentImage: 1,
-  EmptySD3LatentImage: 1,
-  EmptyFlux2LatentImage: 1,
-  CLIPLoader: 1,
-  ConditioningZeroOut: 1,
-  RandomNoise: 1,
-  KSamplerSelect: 1,
-  Flux2Scheduler: 1,
-  CFGGuider: 1,
-  SamplerCustomAdvanced: 2,
-  LoadImage: 2,
-  ImageScale: 1,
-  ImageScaleBy: 1,
-  VAEEncode: 1,
-  GrowMask: 1,
-  SetLatentNoiseMask: 1,
-  SplitSigmasDenoise: 2,
-  ControlNetLoader: 1,
-  ControlNetApplyAdvanced: 2,
-  Canny: 1,
-  DWPreprocessor: 1,
-  UpscaleModelLoader: 1,
-  ImageUpscaleWithModel: 1,
-  UltralyticsDetectorProvider: 2,
-  FaceDetailer: 4,
-  KSampler: 1,
-  VAEDecode: 1,
-  SaveImage: 0,
-  FletchSaveImage: 0,
-};
-
-const isLink = (v: unknown): v is Link =>
-  Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && typeof v[1] === "number";
-
-function expectWellFormed(wf: ApiWorkflow) {
-  for (const node of Object.values(wf)) {
-    expect(OUTPUTS, node.class_type).toHaveProperty(node.class_type);
-    for (const v of Object.values(node.inputs)) {
-      if (!isLink(v)) continue;
-      expect(wf[v[0]], `link to node ${v[0]}`).toBeDefined();
-      expect(v[1]).toBeLessThan(OUTPUTS[wf[v[0]].class_type]);
-    }
-  }
-  expect(Object.values(wf).filter((n) => n.class_type === "SaveImage" || n.class_type === "FletchSaveImage")).toHaveLength(1);
-}
-
-const byType = (wf: ApiWorkflow, type: string) => Object.entries(wf).filter(([, n]) => n.class_type === type);
-const one = (wf: ApiWorkflow, type: string) => {
-  const found = byType(wf, type);
-  expect(found, type).toHaveLength(1);
-  return found[0];
-};
-const sampler = (wf: ApiWorkflow) => one(wf, "KSampler")[1].inputs;
-const follow = (wf: ApiWorkflow, link: unknown) => wf[(link as Link)[0]];
+import { base, byType, expectWellFormed, fluxParts, follow, one, sampler } from "./testutil";
+import { compile, modelProblems, nodeDefaults, pickParts, resolve, sizeFor, type Link } from "./workflow";
 
 describe("compile", () => {
   it("builds plain SDXL text-to-image from the profile", () => {
@@ -282,7 +203,7 @@ describe("save destination", () => {
 describe("resolve", () => {
   it("reports what the run will use", () => {
     expect(resolve({ family: "sdxl", shape: "wide", quality: "best", advanced: {} })).toEqual({
-      width: 1216, height: 832, steps: 40, cfg: 6, sampler: "dpmpp_2m", scheduler: "karras", clipSkip: 1,
+      width: 1216, height: 832, steps: 40, cfg: 6, seconds: 0, frames: 1, sampler: "dpmpp_2m", scheduler: "karras", clipSkip: 1,
     });
   });
 });
@@ -391,6 +312,49 @@ describe("add-ons", () => {
     const up = one(wf, "ImageUpscaleWithModel")[1];
     expect(up.inputs.image).toEqual([faceId, 0]);
     expect(follow(wf, one(wf, "SaveImage")[1].inputs.images)).toBe(up);
+  });
+
+  it("swaps in a face with ReActor before face fix, filling ReActor's other inputs from its defaults", () => {
+    const nodes = {
+      ReActorFaceSwap: {
+        input: {
+          required: {
+            enabled: ["BOOLEAN", { default: true }],
+            input_image: ["IMAGE"],
+            swap_model: [["inswapper_128.onnx"]],
+            facedetection: [["retinaface_resnet50", "YOLOv5n"]],
+            face_restore_model: [["none", "GFPGANv1.4.pth", "codeformer-v0.1.0.pth"]],
+            face_restore_visibility: ["FLOAT", { default: 1 }],
+            codeformer_weight: ["FLOAT", { default: 0.5 }],
+            detect_gender_input: [["no", "female", "male"]],
+            input_faces_index: ["STRING", { default: "0" }],
+          },
+          optional: { source_image: ["IMAGE"] },
+        },
+      },
+      FaceDetailer: { input: { required: { image: ["IMAGE"] } } },
+      UltralyticsDetectorProvider: { input: { required: { model_name: [["bbox/face_yolov8m.pt"]] } } },
+    };
+    const face = { name: "fletch/me.png", width: 512, height: 512 };
+    const wf = compile(
+      { ...base, addons: { faceSwap: { image: face }, faceFix: { detector: "bbox/face_yolov8m.pt", strength: 0.4 } } },
+      {},
+      undefined,
+      nodes,
+    );
+    expectWellFormed(wf);
+    const [swapId, swap] = one(wf, "ReActorFaceSwap");
+    expect(swap.inputs).toMatchObject({
+      enabled: true,
+      swap_model: "inswapper_128.onnx",
+      facedetection: "retinaface_resnet50",
+      face_restore_model: "codeformer-v0.1.0.pth",
+      detect_gender_input: "no",
+      input_faces_index: "0",
+    });
+    expect(follow(wf, swap.inputs.input_image).class_type).toBe("VAEDecode");
+    expect(follow(wf, swap.inputs.source_image).inputs.image).toBe("fletch/me.png");
+    expect(one(wf, "FaceDetailer")[1].inputs.image).toEqual([swapId, 0]);
   });
 
   it("applies a guide to both prompts, with the right preprocessor", () => {

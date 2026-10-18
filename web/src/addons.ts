@@ -2,13 +2,14 @@
 
 import type { Catalog, LoraInfo } from "./comfy";
 import type { Profile } from "./profiles";
-import { GUIDE_PREPROCESSORS, type Addons, type GuideMode, type InputImage } from "./workflow";
+import { comboOptions, GUIDE_PREPROCESSORS, type Addons, type GifOutput, type GuideMode, type InputImage } from "./workflow";
 
 export interface AddonChoices {
-  source: { on: boolean; image?: InputImage; masked?: InputImage; strength: number };
+  source: { on: boolean; image?: InputImage; masked?: InputImage; strength: number; output?: GifOutput };
   hires: { on: boolean; scale: number; strength: number };
   upscale: { on: boolean; model: string };
   faceFix: { on: boolean; detector: string; strength: number };
+  faceSwap: { on: boolean; image?: InputImage };
   guide: { on: boolean; image?: InputImage; mode: GuideMode; model: string; strength: number };
 }
 
@@ -17,6 +18,7 @@ export const DEFAULT_ADDONS: AddonChoices = {
   hires: { on: false, scale: 1.5, strength: 0.45 },
   upscale: { on: false, model: "" },
   faceFix: { on: false, detector: "", strength: 0.4 },
+  faceSwap: { on: false },
   guide: { on: false, mode: "canny", model: "", strength: 0.7 },
 };
 
@@ -43,6 +45,17 @@ export function guideModeAvailable(mode: GuideMode, catalog: Catalog) {
 
 /** null when an add-on can run, otherwise what's missing, in words a person can act on. */
 export function unavailable(profile: Profile | null, catalog: Catalog, controlnets: LoraInfo[]): Record<AddonKey, string | null> {
+  if (profile?.video) {
+    const notVideo = "Not available for video yet.";
+    return {
+      source: null,
+      hires: notVideo,
+      upscale: notVideo,
+      faceFix: notVideo,
+      faceSwap: notVideo,
+      guide: notVideo,
+    };
+  }
   const flux2 = profile?.arch === "flux2" ? "Not available for Flux.2 models yet." : null;
   // No ControlNets exist for Krea 2 yet.
   const noGuide = profile?.arch === "krea2" ? "Not available for Krea 2 yet." : flux2;
@@ -57,6 +70,11 @@ export function unavailable(profile: Profile | null, catalog: Catalog, controlne
         : faceDetectors(catalog).length
           ? null
           : "Add a face detection model (face_yolov8m.pt) to models/ultralytics/bbox."),
+    faceSwap: !catalog.nodes.ReActorFaceSwap
+      ? "Needs the ReActor custom node (ComfyUI-ReActor; install it from ComfyUI Manager), then restart ComfyUI."
+      : comboOptions(catalog.nodes.ReActorFaceSwap, "swap_model").length
+        ? null
+        : "Add the face swap model (inswapper_128.onnx) to models/insightface.",
     guide:
       noGuide ??
       (profile && controlnetsFor(profile, controlnets).length === 0
@@ -73,8 +91,8 @@ export function addonsForRun(
   allowedControlnets: Set<string>,
 ): Addons {
   const out: Addons = {};
-  if (a.source.on && a.source.image) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength };
-  if (a.hires.on) out.hires = { scale: a.hires.scale, strength: a.hires.strength };
+  if (a.source.on && a.source.image && !blocked.source) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength, output: a.source.output };
+  if (a.hires.on && !blocked.hires) out.hires = { scale: a.hires.scale, strength: a.hires.strength };
   if (a.upscale.on && !blocked.upscale) {
     const model = catalog.upscaleModels.includes(a.upscale.model) ? a.upscale.model : catalog.upscaleModels[0];
     out.upscale = { model };
@@ -83,6 +101,7 @@ export function addonsForRun(
     const faces = faceDetectors(catalog);
     out.faceFix = { detector: faces.includes(a.faceFix.detector) ? a.faceFix.detector : faces[0], strength: a.faceFix.strength };
   }
+  if (a.faceSwap.on && a.faceSwap.image && !blocked.faceSwap) out.faceSwap = { image: a.faceSwap.image };
   const g = a.guide;
   if (g.on && !blocked.guide && g.image && allowedControlnets.has(g.model) && guideModeAvailable(g.mode, catalog)) {
     out.guide = { image: g.image, mode: g.mode, model: g.model, strength: g.strength };

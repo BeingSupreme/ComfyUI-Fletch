@@ -209,3 +209,44 @@ def test_lora_krea2(tmp_path):
     assert lora(tmp_path, "krea2_darkbrush.safetensors", {"diffusion_model.blocks.0.attn.wq.lora_A.weight": [16, 3072]}) == "krea2"
     assert lora(tmp_path, "k2_diffusers.safetensors", {"transformer.transformer_blocks.0.attn.to_gate.lora_A.weight": [16, 3072]}) == "krea2"
     assert lora(tmp_path, "k2_meta.safetensors", {"x": [1]}, {"ss_base_model_version": "krea2"}) == "krea2"
+
+
+def wan(width, channels):
+    return {
+        "patch_embedding.weight": [width, channels, 1, 2, 2],
+        "blocks.0.cross_attn.k.weight": [width, width],
+    }
+
+
+def test_wan_families(tmp_path):
+    assert model(tmp_path, "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors", wan(5120, 16))["family"] == "wan22_t2v"
+    assert model(tmp_path, "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors", wan(5120, 36))["family"] == "wan22_i2v"
+    assert model(tmp_path, "wan2.2_ti2v_5B_fp16.safetensors", wan(3072, 48))["family"] == "wan22_5b"
+    assert model(tmp_path, "wan2.1_t2v_14B_fp16.safetensors", wan(5120, 16))["family"] == "wan21"
+    assert model(tmp_path, "wan2.1_t2v_1.3B_fp16.safetensors", wan(1536, 16))["family"] == "wan21"
+
+
+def test_lora_wan(tmp_path):
+    keys = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": [64, 5120]}
+    assert lora(tmp_path, "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors", keys) == "wan"
+    kohya = {"lora_unet_blocks_0_self_attn_q.lora_down.weight": [64, 5120]}
+    assert lora(tmp_path, "wan_style.safetensors", kohya) == "wan"
+
+
+LTX_AV = {
+    "model.diffusion_model.adaln_single.emb.timestep_embedder.linear_1.bias": [4096],
+    "model.diffusion_model.audio_adaln_single.linear.weight": [12288, 2048],
+    "model.diffusion_model.transformer_blocks.0.attn2.to_k.weight": [4096, 4096],
+    "vae.decoder.conv_in.weight": [1],
+}
+
+
+def test_ltx_versions(tmp_path):
+    assert model(tmp_path, "ltx-2.3-22b-dev-fp8.safetensors", LTX_AV)["family"] == "ltx23"
+    assert model(tmp_path, "ltx-2-19b-dev-fp8.safetensors", LTX_AV)["family"] == "ltx2"
+    old = {k: v for k, v in LTX_AV.items() if "audio" not in k}
+    assert model(tmp_path, "ltxv-13b-0.9.8-dev.safetensors", old)["family"] == "ltxv"
+
+
+def test_lora_ltx_by_name(tmp_path):
+    assert lora(tmp_path, "ltx_2.3_22b_distilled_1.1_lora.safetensors", {"x.lora_A.weight": [1, 1]}) == "ltx"

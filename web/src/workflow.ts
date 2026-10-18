@@ -5,6 +5,7 @@
 // say where it plugs in and everything downstream picks it up.
 
 import { PROFILES, type Family, type Quality, type Shape } from "./profiles";
+import { compileVideo } from "./video";
 
 export type Link = [nodeId: string, outputIndex: number];
 
@@ -36,6 +37,9 @@ export interface InputImage {
   name: string;
   width: number;
   height: number;
+  /** Animated GIFs: how many frames, and how fast they play. */
+  frames?: number;
+  fps?: number;
 }
 
 /** Start from an image (img2img), optionally repainting only a masked area (inpaint). */
@@ -45,7 +49,11 @@ export interface SourceAddon {
   masked?: InputImage;
   /** How much to change: 0 keeps the image, 1 ignores it. */
   strength: number;
+  /** Animated GIFs on video models: save a GIF, a video (with sound on LTX), or keep the picture and add sound (LTX). */
+  output?: GifOutput;
 }
+
+export type GifOutput = "gif" | "video" | "sound";
 
 export interface HiresAddon {
   scale: number;
@@ -70,11 +78,17 @@ export interface GuideAddon {
   strength: number;
 }
 
+/** Put the face from a picture onto the faces in the result (ReActor). */
+export interface FaceSwapAddon {
+  image: InputImage;
+}
+
 export interface Addons {
   source?: SourceAddon;
   hires?: HiresAddon;
   upscale?: UpscaleAddon;
   faceFix?: FaceFixAddon;
+  faceSwap?: FaceSwapAddon;
   guide?: GuideAddon;
 }
 
@@ -98,6 +112,14 @@ export interface NodeInfo {
 export type NodeInfos = Record<string, NodeInfo | undefined>;
 
 /** Every widget input of a node at its default value; links are left for the caller. */
+/** A combo input's choices from /object_info, in either of ComfyUI's two shapes. */
+export function comboOptions(info: NodeInfo | undefined, input: string): string[] {
+  const spec = (info?.input?.required?.[input] ?? info?.input?.optional?.[input]) as [unknown, Record<string, unknown>?] | undefined;
+  if (!spec) return [];
+  if (Array.isArray(spec[0])) return spec[0] as string[];
+  return spec[0] === "COMBO" ? ((spec[1]?.options as string[] | undefined) ?? []) : [];
+}
+
 export function nodeDefaults(info: NodeInfo | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(info?.input?.required ?? {})) {
@@ -122,6 +144,10 @@ export interface Settings {
   seed: number;
   advanced: Advanced;
   addons?: Addons;
+  /** Video models: length in seconds. */
+  seconds?: number;
+  /** Wan 2.2 14B speed LoRAs (lightx2v), used for Fast: 4 steps at CFG 1. */
+  speedLora?: { high: string; low: string };
 }
 
 /** Separate files a diffusion-only model needs (Flux ships without encoders or VAE). */
@@ -130,6 +156,21 @@ export interface Parts {
   clipL?: string;
   qwen?: string;
   vae?: string;
+  /** UMT5 text encoder (Wan). */
+  umt5?: string;
+  /** Wan 2.2 14B: the two halves of the model pair. */
+  high?: string;
+  low?: string;
+  /** LTX-2.3: Gemma 3 text encoder, distilled LoRA and 2x latent upscaler. */
+  gemma?: string;
+  distillLora?: string;
+  upscaler?: string;
+}
+
+/** Files beyond text encoders and VAEs that some families need. */
+export interface ExtraFiles {
+  loras?: string[];
+  latentUpscalers?: string[];
 }
 
 export const randomSeed = () => Math.floor(Math.random() * 2 ** 48);
@@ -149,32 +190,85 @@ export function sizeFor(family: Family, shape: Shape, source?: { width: number; 
 }
 
 /** The numbers a run will actually use: profile defaults with Advanced overrides applied. */
-export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced" | "addons">) {
+export function resolve(s: Pick<Settings, "family" | "shape" | "quality" | "advanced" | "addons" | "seconds" | "speedLora">) {
   const p = PROFILES[s.family];
   const [width, height] = sizeFor(s.family, s.shape, s.addons?.source?.image);
+  const speed = !!s.speedLora;
+  const v = p.video;
+  const seconds = v ? (s.seconds && v.seconds.includes(s.seconds) ? s.seconds : v.seconds.includes(5) ? 5 : v.seconds[v.seconds.length - 1]) : 0;
   return {
     width,
     height,
-    steps: s.advanced.steps ?? p.steps[s.quality],
-    cfg: s.advanced.cfg ?? p.cfg,
+    steps: s.advanced.steps ?? (speed ? 4 : p.steps[s.quality]),
+    cfg: s.advanced.cfg ?? (speed ? 1 : p.cfg),
+    seconds,
+    frames: v ? seconds * v.fps + 1 : 1,
     sampler: s.advanced.sampler ?? p.sampler,
     scheduler: s.advanced.scheduler ?? p.scheduler,
     clipSkip: s.advanced.clipSkip ?? p.clipSkip,
   };
 }
 
-const withPrefix = (prefix: string | undefined, text: string) =>
+export const withPrefix = (prefix: string | undefined, text: string) =>
   prefix ? (text.trim() ? `${prefix}, ${text.trim()}` : prefix) : text.trim();
 
-const basename = (path: string) => (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+export const basename = (path: string) => (path.split(/[\\/]/).pop() ?? path).toLowerCase();
 
 const QWEN = { "4b": /qwen.?3.?4b/i, "9b": /qwen.?3.?8b/i } as Record<string, RegExp>;
 const QWEN_VL = /qwen.?3.?vl/i;
 const QWEN_FILE = { "4b": "qwen_3_4b.safetensors", "9b": "qwen_3_8b_fp8mixed.safetensors" } as Record<string, string>;
 
-/** Pick the text encoders and VAE a diffusion-only Flux model needs from what's on disk. */
-export function pickParts(family: Family, variant: string | null | undefined, textEncoders: string[], vaes: string[]): Parts {
-  const arch = PROFILES[family].arch;
+/** The other half of a Wan 2.2 14B pair: same file name with "high" and "low" swapped. */
+export function partnerName(name: string, from: "high" | "low"): string | null {
+  const cut = Math.max(name.lastIndexOf("/"), name.lastIndexOf("\\")) + 1;
+  const [dir, base] = [name.slice(0, cut), name.slice(cut)];
+  const to = from === "high" ? "low" : "high";
+  const swap = (word: string) => (word === word.toUpperCase() ? to.toUpperCase() : word[0] === word[0].toUpperCase() ? to[0].toUpperCase() + to.slice(1) : to);
+  const near = new RegExp(`${from}(?=[\\s_.-]*noise)`, "i");
+  const any = new RegExp(from, "i");
+  const re = near.test(base) ? near : any.test(base) ? any : null;
+  return re ? dir + base.replace(re, swap) : null;
+}
+
+/**
+ * Pick the separate files a diffusion-only model needs from what's on disk: text encoders and
+ * VAE, plus for Wan 2.2 14B the other model of its high/low-noise pair.
+ */
+export function pickParts(
+  family: Family,
+  variant: string | null | undefined,
+  textEncoders: string[],
+  vaes: string[],
+  model?: string,
+  diffusionModels: string[] = [],
+  extra: ExtraFiles = {},
+): Parts {
+  const p = PROFILES[family];
+  const arch = p.arch;
+  if (arch === "ltx23") {
+    const gemmas = textEncoders.filter((n) => /gemma.?3/i.test(basename(n)));
+    const distills = (extra.loras ?? []).filter((n) => /ltx.?2.?3/.test(basename(n)) && /distill/.test(basename(n)));
+    const ups = extra.latentUpscalers ?? [];
+    return {
+      gemma: gemmas.find((n) => /12b/i.test(n)) ?? gemmas[0],
+      distillLora: distills[0],
+      upscaler: ups.find((n) => /ltx.?2.?3/.test(basename(n)) && /spatial|upscal/.test(basename(n))) ?? ups.find((n) => /ltx/.test(basename(n))),
+    };
+  }
+  if (arch === "wan22") {
+    const umt5s = textEncoders.filter((n) => /umt5/i.test(n));
+    const parts: Parts = {
+      umt5: umt5s.find((n) => /fp8/i.test(n)) ?? umt5s[0],
+      vae: vaes.find((n) => p.video!.vae!.test(basename(n))),
+    };
+    if (p.video!.experts && model) {
+      const isLow = /low/i.test(basename(model)) && !/high/i.test(basename(model));
+      const other = partnerName(model, isLow ? "low" : "high");
+      const found = other && diffusionModels.includes(other) ? other : undefined;
+      [parts.high, parts.low] = isLow ? [found, model] : [model, found];
+    }
+    return parts;
+  }
   if (arch === "krea2") {
     return {
       qwen: textEncoders.find((n) => QWEN_VL.test(basename(n))),
@@ -208,6 +302,15 @@ export function modelProblems(
   hasTextEncoders?: boolean,
 ): string[] {
   const arch = PROFILES[s.family].arch;
+  if (arch === "ltx23") {
+    const problems: string[] = [];
+    if (s.model.folder !== "checkpoints") problems.push("LTX-2.3 loads as a full checkpoint. Put it in models/checkpoints and pick it there.");
+    if (!parts.gemma) problems.push("Add the Gemma 3 text encoder (gemma_3_12B_it_fp4_mixed.safetensors) to models/text_encoders.");
+    if (!parts.distillLora)
+      problems.push("Add LTX-2.3's distilled LoRA (ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors) to models/loras.");
+    if (!parts.upscaler) problems.push("Add LTX-2.3's upscaler (ltx-2.3-spatial-upscaler-x2-1.1.safetensors) to models/latent_upscale_models.");
+    return problems;
+  }
   if (s.model.folder === "checkpoints") {
     if (hasTextEncoders !== false || arch === "sd") return [];
     return [
@@ -216,6 +319,18 @@ export function modelProblems(
   }
   if (arch === "sd") return ["This file has no text encoders or VAE. Use the full checkpoint for this model instead."];
   const problems: string[] = [];
+  if (arch === "wan22") {
+    const v = PROFILES[s.family].video!;
+    if (!parts.umt5) problems.push("Add the UMT5 text encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors) to models/text_encoders.");
+    if (!parts.vae) problems.push(`Add the Wan VAE (${v.vaeFile}) to models/vae.`);
+    if (v.experts && !(parts.high && parts.low)) {
+      const want = partnerName(s.model.name, parts.low === s.model.name ? "low" : "high");
+      problems.push(
+        `Wan 2.2 14B comes as two models, high noise and low noise. Put the other one${want ? ` (${want.split(/[\\/]/).pop()})` : ""} in models/diffusion_models too.`,
+      );
+    }
+    return problems;
+  }
   if (arch === "krea2") {
     if (!parts.qwen) problems.push("Add the Qwen3-VL text encoder (qwen3vl_4b_fp8_scaled.safetensors) to models/text_encoders.");
     if (!parts.vae) problems.push("Add the Qwen Image VAE (qwen_image_vae.safetensors) to models/vae.");
@@ -233,7 +348,7 @@ export function modelProblems(
   return problems;
 }
 
-class Graph {
+export class Graph {
   nodes: ApiWorkflow = {};
   private next = 1;
   add(class_type: string, inputs: Record<string, unknown>): string {
@@ -243,13 +358,34 @@ class Graph {
   }
 }
 
-const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
+export const loadImage = (g: Graph, img: InputImage) => g.add("LoadImage", { image: img.name });
 
 /** Where to save: a folder inside ComfyUI's output (`subfolder`) or anywhere else (`folder`). */
 export interface Destination {
   subfolder?: string;
   folder?: string;
 }
+
+/** Everything stopping a run, the model's needs first, then the start picture for video. */
+export function runProblems(s: Pick<Settings, "model" | "family" | "variant" | "addons">, parts: Parts, hasTextEncoders?: boolean): string[] {
+  const problems = modelProblems(s, parts, hasTextEncoders);
+  const v = PROFILES[s.family].video;
+  const source = s.addons?.source;
+  const gif = isAnimated(source?.image);
+  if (!v && gif)
+    problems.push("Animated GIFs work with the video models (Wan 2.2 or LTX-2.3). Pick one of those, or start from a still picture.");
+  if (v?.image === "required" && !source)
+    problems.push("This model turns a picture into a video. Turn on Start from an image and add one.");
+  if (v?.image === "required" && gif)
+    problems.push("The image-to-video pair animates a still picture. To restyle a GIF, pick the text-to-video pair, Wan 2.2 5B or LTX-2.3.");
+  if (gif && v && source?.output === "sound" && !v.audio) problems.push("Adding sound needs LTX-2.3. Pick it, or save as a GIF or video.");
+  if (v?.image === "none" && source && !gif)
+    problems.push("This model makes video from text, or restyles an animated GIF. Turn off Start from an image, or pick the image-to-video model.");
+  return problems;
+}
+
+/** An animated GIF to restyle, rather than a still picture to start from. */
+export const isAnimated = (img?: InputImage) => (img?.frames ?? 1) > 1;
 
 export function compile(
   s: Settings,
@@ -258,8 +394,9 @@ export function compile(
   nodes: NodeInfos = {},
   dest: Destination = {},
 ): ApiWorkflow {
-  const problems = modelProblems(s, parts, hasTextEncoders);
+  const problems = runProblems(s, parts, hasTextEncoders);
   if (problems.length) throw new Error(problems.join(" "));
+  if (PROFILES[s.family].video) return compileVideo(s, parts, nodes, dest);
 
   const p = PROFILES[s.family];
   const r = resolve(s);
@@ -398,7 +535,24 @@ export function compile(
     IMAGE = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
   }
 
-  // 6c. Face fix (Impact Pack's FaceDetailer)
+  // 6c. Face swap (ReActor), before face fix so face fix can blend it in
+  if (addons.faceSwap) {
+    const restorers = comboOptions(nodes.ReActorFaceSwap, "face_restore_model");
+    IMAGE = [
+      g.add("ReActorFaceSwap", {
+        ...nodeDefaults(nodes.ReActorFaceSwap),
+        enabled: true,
+        input_image: IMAGE,
+        source_image: [loadImage(g, addons.faceSwap.image), 0],
+        face_restore_model: restorers.find((n) => /codeformer/i.test(n)) ?? restorers.find((n) => /gfpgan/i.test(n)) ?? "none",
+        face_restore_visibility: 1,
+        codeformer_weight: 0.5,
+      }),
+      0,
+    ];
+  }
+
+  // 6d. Face fix (Impact Pack's FaceDetailer)
   if (addons.faceFix) {
     const detector = g.add("UltralyticsDetectorProvider", {
       ...nodeDefaults(nodes.UltralyticsDetectorProvider),
@@ -425,7 +579,7 @@ export function compile(
     ];
   }
 
-  // 6d. Upscale with a model (ESRGAN and friends)
+  // 6e. Upscale with a model (ESRGAN and friends)
   if (addons.upscale) {
     const model = g.add("UpscaleModelLoader", { model_name: addons.upscale.model });
     IMAGE = [g.add("ImageUpscaleWithModel", { upscale_model: [model, 0], image: IMAGE }), 0];

@@ -1,6 +1,7 @@
 // Thin client for ComfyUI's HTTP and websocket API. Fletch is served by ComfyUI itself,
 // so every call is same-origin (the Vite dev server proxies them in development).
 
+import { decodeGifInfo, gifInfo } from "./gif";
 import type { ApiWorkflow, InputImage, NodeInfo, NodeInfos } from "./workflow";
 
 export interface ImageRef {
@@ -51,6 +52,8 @@ export interface Catalog {
   samplers: string[];
   schedulers: string[];
   upscaleModels: string[];
+  /** LTX latent upscalers (models/latent_upscale_models). */
+  latentUpscalers: string[];
   /** Detection models for face fix (Impact Subpack's UltralyticsDetectorProvider). */
   detectors: string[];
   /** /object_info for the custom nodes add-ons use; missing means not installed. */
@@ -61,11 +64,14 @@ export interface Catalog {
 const OPTIONAL_NODES = [
   "FaceDetailer",
   "UltralyticsDetectorProvider",
+  "ReActorFaceSwap",
   "DWPreprocessor",
   "OpenposePreprocessor",
   "DepthAnythingV2Preprocessor",
   "DepthAnythingPreprocessor",
   "MiDaS-DepthMapPreprocessor",
+  "SaveVideo",
+  "CreateVideo",
 ];
 
 async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {
@@ -77,7 +83,7 @@ async function nodeInfo(classType: string): Promise<NodeInfo | undefined> {
 }
 
 export async function loadCatalog(): Promise<Catalog> {
-  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, infos] =
+  const [checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, latentUpscalers, infos] =
     await Promise.all([
       listOptions("CheckpointLoaderSimple", "ckpt_name"),
       listOptions("UNETLoader", "unet_name"),
@@ -87,10 +93,11 @@ export async function loadCatalog(): Promise<Catalog> {
       listOptions("KSampler", "scheduler"),
       listOptions("UpscaleModelLoader", "model_name"),
       listOptions("UltralyticsDetectorProvider", "model_name"),
+      listOptions("LatentUpscaleModelLoader", "model_name"),
       Promise.all(OPTIONAL_NODES.map(nodeInfo)),
     ]);
   const nodes = Object.fromEntries(OPTIONAL_NODES.map((n, i) => [n, infos[i]]));
-  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, nodes };
+  return { checkpoints, diffusionModels, textEncoders, vaes, samplers, schedulers, upscaleModels, detectors, latentUpscalers, nodes };
 }
 
 /** Upload a picture to ComfyUI's input folder (under fletch/) so LoadImage can read it. */
@@ -108,7 +115,12 @@ export async function uploadImage(file: Blob, filename: string): Promise<InputIm
   const res = await fetch("/upload/image", { method: "POST", body: form });
   if (!res.ok) throw new Error(`ComfyUI couldn't save the image (${res.status})`);
   const body = await res.json();
-  return { name: body.subfolder ? `${body.subfolder}/${body.name}` : body.name, ...size };
+  let gif = null;
+  if (file.type === "image/gif" || /\.gif$/i.test(filename)) {
+    gif = gifInfo(await file.arrayBuffer());
+    if (!gif || gif.frames < 2) gif = await decodeGifInfo(file);
+  }
+  return { name: body.subfolder ? `${body.subfolder}/${body.name}` : body.name, ...size, ...(gif && gif.frames > 1 ? gif : {}) };
 }
 
 export const inputImageUrl = (img: InputImage) => {

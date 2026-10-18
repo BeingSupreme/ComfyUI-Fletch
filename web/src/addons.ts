@@ -2,13 +2,14 @@
 
 import type { Catalog, LoraInfo } from "./comfy";
 import type { Profile } from "./profiles";
-import { GUIDE_PREPROCESSORS, type Addons, type GifOutput, type GuideMode, type InputImage } from "./workflow";
+import { comboOptions, GUIDE_PREPROCESSORS, type Addons, type GifOutput, type GuideMode, type InputImage } from "./workflow";
 
 export interface AddonChoices {
   source: { on: boolean; image?: InputImage; masked?: InputImage; strength: number; output?: GifOutput };
   hires: { on: boolean; scale: number; strength: number };
   upscale: { on: boolean; model: string };
   faceFix: { on: boolean; detector: string; strength: number };
+  faceSwap: { on: boolean; image?: InputImage };
   guide: { on: boolean; image?: InputImage; mode: GuideMode; model: string; strength: number };
 }
 
@@ -17,6 +18,7 @@ export const DEFAULT_ADDONS: AddonChoices = {
   hires: { on: false, scale: 1.5, strength: 0.45 },
   upscale: { on: false, model: "" },
   faceFix: { on: false, detector: "", strength: 0.4 },
+  faceSwap: { on: false },
   guide: { on: false, mode: "canny", model: "", strength: 0.7 },
 };
 
@@ -50,6 +52,7 @@ export function unavailable(profile: Profile | null, catalog: Catalog, controlne
       hires: notVideo,
       upscale: notVideo,
       faceFix: notVideo,
+      faceSwap: notVideo,
       guide: notVideo,
     };
   }
@@ -67,6 +70,11 @@ export function unavailable(profile: Profile | null, catalog: Catalog, controlne
         : faceDetectors(catalog).length
           ? null
           : "Add a face detection model (face_yolov8m.pt) to models/ultralytics/bbox."),
+    faceSwap: !catalog.nodes.ReActorFaceSwap
+      ? "Needs the ReActor custom node (ComfyUI-ReActor; install it from ComfyUI Manager), then restart ComfyUI."
+      : comboOptions(catalog.nodes.ReActorFaceSwap, "swap_model").length
+        ? null
+        : "Add the face swap model (inswapper_128.onnx) to models/insightface.",
     guide:
       noGuide ??
       (profile && controlnetsFor(profile, controlnets).length === 0
@@ -93,6 +101,7 @@ export function addonsForRun(
     const faces = faceDetectors(catalog);
     out.faceFix = { detector: faces.includes(a.faceFix.detector) ? a.faceFix.detector : faces[0], strength: a.faceFix.strength };
   }
+  if (a.faceSwap.on && a.faceSwap.image && !blocked.faceSwap) out.faceSwap = { image: a.faceSwap.image };
   const g = a.guide;
   if (g.on && !blocked.guide && g.image && allowedControlnets.has(g.model) && guideModeAvailable(g.mode, catalog)) {
     out.guide = { image: g.image, mode: g.mode, model: g.model, strength: g.strength };

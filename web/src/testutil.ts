@@ -80,6 +80,7 @@ export const OUTPUTS: Record<string, number> = {
   LTXVAudioVAEDecode: 1,
   ImageFromBatch: 1,
   FletchSaveGif: 0,
+  ReActorFaceSwap: 2,
   SolidMask: 1,
 };
 

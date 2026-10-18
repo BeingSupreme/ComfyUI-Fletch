@@ -320,6 +320,7 @@ export function App() {
         hires: { ...c.addons.hires, on: !!s.addons?.hires, ...s.addons?.hires },
         upscale: { ...c.addons.upscale, on: !!s.addons?.upscale, ...s.addons?.upscale },
         faceFix: { ...c.addons.faceFix, on: !!s.addons?.faceFix, ...s.addons?.faceFix },
+        faceSwap: { ...c.addons.faceSwap, on: !!s.addons?.faceSwap, ...s.addons?.faceSwap },
         guide: { ...c.addons.guide, on: !!s.addons?.guide, ...s.addons?.guide },
       },
     }));

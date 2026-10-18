@@ -64,6 +64,7 @@ export interface Catalog {
 const OPTIONAL_NODES = [
   "FaceDetailer",
   "UltralyticsDetectorProvider",
+  "ReActorFaceSwap",
   "DWPreprocessor",
   "OpenposePreprocessor",
   "DepthAnythingV2Preprocessor",

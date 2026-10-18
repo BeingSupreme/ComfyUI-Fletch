@@ -169,6 +169,20 @@ export function AddonCards(props: {
         </div>
       )}
 
+      <Toggle label="Face swap" on={a.faceSwap.on} disabled={!!blocked.faceSwap} onChange={(on) => set("faceSwap", { on })} />
+      {note("faceSwap")}
+      {a.faceSwap.on && !blocked.faceSwap && (
+        <div className="sub">
+          <ImageDrop
+            label="Drop a picture of the face to use"
+            image={a.faceSwap.image}
+            onImage={(image) => set("faceSwap", { image })}
+            onError={props.onError}
+          />
+          <p className="muted small note">Only use the face of someone who has agreed to it.</p>
+        </div>
+      )}
+
       <Toggle label="Pose or edge guide" on={a.guide.on} disabled={!!blocked.guide} onChange={(on) => set("guide", { on })} />
       {note("guide")}
       {a.guide.on && !blocked.guide && (

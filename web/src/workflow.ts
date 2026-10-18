@@ -78,11 +78,17 @@ export interface GuideAddon {
   strength: number;
 }
 
+/** Put the face from a picture onto the faces in the result (ReActor). */
+export interface FaceSwapAddon {
+  image: InputImage;
+}
+
 export interface Addons {
   source?: SourceAddon;
   hires?: HiresAddon;
   upscale?: UpscaleAddon;
   faceFix?: FaceFixAddon;
+  faceSwap?: FaceSwapAddon;
   guide?: GuideAddon;
 }
 
@@ -106,6 +112,14 @@ export interface NodeInfo {
 export type NodeInfos = Record<string, NodeInfo | undefined>;
 
 /** Every widget input of a node at its default value; links are left for the caller. */
+/** A combo input's choices from /object_info, in either of ComfyUI's two shapes. */
+export function comboOptions(info: NodeInfo | undefined, input: string): string[] {
+  const spec = (info?.input?.required?.[input] ?? info?.input?.optional?.[input]) as [unknown, Record<string, unknown>?] | undefined;
+  if (!spec) return [];
+  if (Array.isArray(spec[0])) return spec[0] as string[];
+  return spec[0] === "COMBO" ? ((spec[1]?.options as string[] | undefined) ?? []) : [];
+}
+
 export function nodeDefaults(info: NodeInfo | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(info?.input?.required ?? {})) {
@@ -521,7 +535,24 @@ export function compile(
     IMAGE = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
   }
 
-  // 6c. Face fix (Impact Pack's FaceDetailer)
+  // 6c. Face swap (ReActor), before face fix so face fix can blend it in
+  if (addons.faceSwap) {
+    const restorers = comboOptions(nodes.ReActorFaceSwap, "face_restore_model");
+    IMAGE = [
+      g.add("ReActorFaceSwap", {
+        ...nodeDefaults(nodes.ReActorFaceSwap),
+        enabled: true,
+        input_image: IMAGE,
+        source_image: [loadImage(g, addons.faceSwap.image), 0],
+        face_restore_model: restorers.find((n) => /codeformer/i.test(n)) ?? restorers.find((n) => /gfpgan/i.test(n)) ?? "none",
+        face_restore_visibility: 1,
+        codeformer_weight: 0.5,
+      }),
+      0,
+    ];
+  }
+
+  // 6d. Face fix (Impact Pack's FaceDetailer)
   if (addons.faceFix) {
     const detector = g.add("UltralyticsDetectorProvider", {
       ...nodeDefaults(nodes.UltralyticsDetectorProvider),
@@ -548,7 +579,7 @@ export function compile(
     ];
   }
 
-  // 6d. Upscale with a model (ESRGAN and friends)
+  // 6e. Upscale with a model (ESRGAN and friends)
   if (addons.upscale) {
     const model = g.add("UpscaleModelLoader", { model_name: addons.upscale.model });
     IMAGE = [g.add("ImageUpscaleWithModel", { upscale_model: [model, 0], image: IMAGE }), 0];

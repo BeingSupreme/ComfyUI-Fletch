@@ -314,6 +314,49 @@ describe("add-ons", () => {
     expect(follow(wf, one(wf, "SaveImage")[1].inputs.images)).toBe(up);
   });
 
+  it("swaps in a face with ReActor before face fix, filling ReActor's other inputs from its defaults", () => {
+    const nodes = {
+      ReActorFaceSwap: {
+        input: {
+          required: {
+            enabled: ["BOOLEAN", { default: true }],
+            input_image: ["IMAGE"],
+            swap_model: [["inswapper_128.onnx"]],
+            facedetection: [["retinaface_resnet50", "YOLOv5n"]],
+            face_restore_model: [["none", "GFPGANv1.4.pth", "codeformer-v0.1.0.pth"]],
+            face_restore_visibility: ["FLOAT", { default: 1 }],
+            codeformer_weight: ["FLOAT", { default: 0.5 }],
+            detect_gender_input: [["no", "female", "male"]],
+            input_faces_index: ["STRING", { default: "0" }],
+          },
+          optional: { source_image: ["IMAGE"] },
+        },
+      },
+      FaceDetailer: { input: { required: { image: ["IMAGE"] } } },
+      UltralyticsDetectorProvider: { input: { required: { model_name: [["bbox/face_yolov8m.pt"]] } } },
+    };
+    const face = { name: "fletch/me.png", width: 512, height: 512 };
+    const wf = compile(
+      { ...base, addons: { faceSwap: { image: face }, faceFix: { detector: "bbox/face_yolov8m.pt", strength: 0.4 } } },
+      {},
+      undefined,
+      nodes,
+    );
+    expectWellFormed(wf);
+    const [swapId, swap] = one(wf, "ReActorFaceSwap");
+    expect(swap.inputs).toMatchObject({
+      enabled: true,
+      swap_model: "inswapper_128.onnx",
+      facedetection: "retinaface_resnet50",
+      face_restore_model: "codeformer-v0.1.0.pth",
+      detect_gender_input: "no",
+      input_faces_index: "0",
+    });
+    expect(follow(wf, swap.inputs.input_image).class_type).toBe("VAEDecode");
+    expect(follow(wf, swap.inputs.source_image).inputs.image).toBe("fletch/me.png");
+    expect(one(wf, "FaceDetailer")[1].inputs.image).toEqual([swapId, 0]);
+  });
+
   it("applies a guide to both prompts, with the right preprocessor", () => {
     const guide = { image: photo, mode: "canny" as const, model: "controlnet-canny-sdxl.safetensors", strength: 0.7 };
     const wf = compile({ ...base, addons: { guide } });

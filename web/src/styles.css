@@ -61,6 +61,11 @@ button:disabled { opacity: 0.5; cursor: default; }
 .grid img, .grid .cell { position: static; width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 6px; cursor: pointer; display: grid; place-items: center; }
 .grid .cell { border: 1px dashed var(--border); cursor: default; }
 .grid img.pending { opacity: 0.6; cursor: default; }
+.zoom { position: absolute; inset: 0; overflow: hidden; cursor: zoom-in; touch-action: none; }
+.zoom.zoomed { cursor: grab; }
+.zoom.zoomed:active { cursor: grabbing; }
+.preview .zoom img { transform-origin: center; user-select: none; }
+.zoom-level { position: absolute; top: 8px; right: 8px; padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); }
 .progress { position: absolute; left: 16px; right: 16px; bottom: 16px; }
 .bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 4px; }
 .bar div { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.2s; }

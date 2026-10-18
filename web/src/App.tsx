@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AddonCards } from "./AddonCards";
+import { ZoomImage } from "./ZoomImage";
 import { addonsForRun, controlnetsFor, DEFAULT_ADDONS, unavailable, type AddonChoices, type AddonKey } from "./addons";
 import { HistoryBar } from "./HistoryBar";
 import { findSpeedLoras, frameStep, gifFrames, ltxRestyleSigmas } from "./video";
@@ -674,7 +675,7 @@ export function App() {
             isVideo(preview) ? (
               <video src={preview} autoPlay loop muted controls playsInline />
             ) : (
-              <img src={preview} alt="Latest result" />
+              <ZoomImage src={preview} alt="Latest result" />
             )
           ) : (
             <span className="muted">Your {profile?.video ? "video" : "image"} appears here</span>

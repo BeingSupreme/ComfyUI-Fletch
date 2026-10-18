@@ -25,6 +25,7 @@ The built app ships in `dist/`, so there's nothing to build to use it.
 - **LoRA** add-on. The list only shows LoRAs made for the current model's family (plus any it can't identify). Add as many as you like, each with its own weight.
 - **Advanced** holds steps, CFG, sampler, scheduler, clip skip and seed, pre-filled from the family's defaults.
 - **History** keeps your last 40 images. Click one, then "Use these settings" to get the exact same setup back, seed included. Every saved PNG also carries its Fletch settings in its metadata.
+- **Zoom**: scroll over the preview to zoom in where the pointer is (up to 800%), drag to move around, and double-click to fit it again.
 - **Batch** (image models) makes 1 to 9 images per run, each with the next seed, and shows them as a grid. Click one to see it large, and **Back to the grid** to return.
 - **Save to** (above the history) picks where images go: ComfyUI's output folder by default, a named folder inside it, or any folder on your PC (Browse opens your system's folder picker when ComfyUI's Python has it; otherwise paste the path). **Open folder** shows it in your file manager, and **Clear history** empties the list without deleting any images.
 

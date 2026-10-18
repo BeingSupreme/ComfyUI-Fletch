@@ -49,7 +49,11 @@ export interface SourceAddon {
   masked?: InputImage;
   /** How much to change: 0 keeps the image, 1 ignores it. */
   strength: number;
+  /** Animated GIFs on video models: save a GIF, a video (with sound on LTX), or keep the picture and add sound (LTX). */
+  output?: GifOutput;
 }
+
+export type GifOutput = "gif" | "video" | "sound";
 
 export interface HiresAddon {
   scale: number;
@@ -360,6 +364,7 @@ export function runProblems(s: Pick<Settings, "model" | "family" | "variant" | "
     problems.push("This model turns a picture into a video. Turn on Start from an image and add one.");
   if (v?.image === "required" && gif)
     problems.push("The image-to-video pair animates a still picture. To restyle a GIF, pick the text-to-video pair, Wan 2.2 5B or LTX-2.3.");
+  if (gif && v && source?.output === "sound" && !v.audio) problems.push("Adding sound needs LTX-2.3. Pick it, or save as a GIF or video.");
   if (v?.image === "none" && source && !gif)
     problems.push("This model makes video from text, or restyles an animated GIF. Turn off Start from an image, or pick the image-to-video model.");
   return problems;

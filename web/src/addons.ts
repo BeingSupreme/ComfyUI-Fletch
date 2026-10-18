@@ -2,10 +2,10 @@
 
 import type { Catalog, LoraInfo } from "./comfy";
 import type { Profile } from "./profiles";
-import { GUIDE_PREPROCESSORS, type Addons, type GuideMode, type InputImage } from "./workflow";
+import { GUIDE_PREPROCESSORS, type Addons, type GifOutput, type GuideMode, type InputImage } from "./workflow";
 
 export interface AddonChoices {
-  source: { on: boolean; image?: InputImage; masked?: InputImage; strength: number };
+  source: { on: boolean; image?: InputImage; masked?: InputImage; strength: number; output?: GifOutput };
   hires: { on: boolean; scale: number; strength: number };
   upscale: { on: boolean; model: string };
   faceFix: { on: boolean; detector: string; strength: number };
@@ -83,7 +83,7 @@ export function addonsForRun(
   allowedControlnets: Set<string>,
 ): Addons {
   const out: Addons = {};
-  if (a.source.on && a.source.image && !blocked.source) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength };
+  if (a.source.on && a.source.image && !blocked.source) out.source = { image: a.source.image, masked: a.source.masked, strength: a.source.strength, output: a.source.output };
   if (a.hires.on && !blocked.hires) out.hires = { scale: a.hires.scale, strength: a.hires.strength };
   if (a.upscale.on && !blocked.upscale) {
     const model = catalog.upscaleModels.includes(a.upscale.model) ? a.upscale.model : catalog.upscaleModels[0];

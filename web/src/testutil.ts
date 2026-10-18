@@ -80,6 +80,7 @@ export const OUTPUTS: Record<string, number> = {
   LTXVAudioVAEDecode: 1,
   ImageFromBatch: 1,
   FletchSaveGif: 0,
+  SolidMask: 1,
 };
 
 export const isLink = (v: unknown): v is Link =>

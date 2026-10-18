@@ -44,6 +44,7 @@ Pick a Wan 2.2 model and Fletch switches to video: a **Length** choice (2, 3 or 
   It runs the template's fixed schedule (8 steps at half size, then 3 more after a 2x upscale), so the Quality choice is hidden. A start picture from **Start from an image** becomes the first frame. LTX offers up to 20 seconds; longer clips need more memory and time.
 - **Continue from last frame** (under a finished video) makes its final frame the start picture for the next run, so you can chain clips. Each clip saves as its own file.
 - **GIF to GIF**: turn on **Start from an image** and drop in an animated GIF. Fletch restyles its frames with your prompt and saves a GIF at the same speed. **Change** sets how far it moves from the original. It works with the Wan 2.2 text-to-video pair, Wan 2.2 5B and LTX-2.3. Fletch uses the GIF's frames up to the chosen length, rounded down to a count the model takes, so a few frames at the end may be dropped.
+  - **Make** picks what comes out: **GIF**, **Video** (with sound on LTX-2.3), or **Add sound only** (LTX-2.3), which keeps the GIF's picture exactly and makes a soundtrack from your prompt.
 - Wan LoRAs work. One whose name says high noise or low noise goes on that half only; others go on both.
 - The image add-ons (hires fix, face fix, guide, upscale) are off for video for now.
 

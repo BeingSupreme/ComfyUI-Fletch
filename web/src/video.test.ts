@@ -238,6 +238,37 @@ describe("GIF to GIF", () => {
     expect(ltxRestyleSigmas(1)).toBe("1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0");
   });
 
+  it("saves a restyled GIF as a video, with LTX's sound", () => {
+    const ltxParts = { gemma: "gemma.safetensors", distillLora: "ltx_2.3_distilled_lora.safetensors", upscaler: "up.safetensors" };
+    const ltx = restyle("ltx23", { folder: "checkpoints", name: "ltx-2.3-22b-dev-fp8.safetensors" });
+    const wf = compile({ ...ltx, addons: { source: { image: gif, strength: 0.6, output: "video" } } }, ltxParts);
+    expectWellFormed(wf);
+    const video = one(wf, "CreateVideo")[1].inputs;
+    expect(video.fps).toBe(10);
+    expect(follow(wf, video.audio).class_type).toBe("LTXVAudioVAEDecode");
+    expect(follow(wf, video.images).class_type).toBe("VAEDecodeTiled");
+    const wan = compile({ ...restyle("wan22_t2v", t2v.model), addons: { source: { image: gif, strength: 0.6, output: "video" } } }, parts);
+    expectWellFormed(wan);
+    expect(one(wan, "CreateVideo")[1].inputs).toMatchObject({ fps: 10 });
+    expect(one(wan, "CreateVideo")[1].inputs.audio).toBeUndefined();
+  });
+
+  it("adds sound only: the GIF's frames pass through untouched while LTX makes the soundtrack", () => {
+    const ltxParts = { gemma: "gemma.safetensors", distillLora: "ltx_2.3_distilled_lora.safetensors", upscaler: "up.safetensors" };
+    const ltx = restyle("ltx23", { folder: "checkpoints", name: "ltx-2.3-22b-dev-fp8.safetensors" });
+    const wf = compile({ ...ltx, addons: { source: { image: gif, strength: 0.6, output: "sound" } } }, ltxParts);
+    expectWellFormed(wf);
+    const concat = one(wf, "LTXVConcatAVLatent")[1].inputs;
+    const masked = follow(wf, concat.video_latent);
+    expect(masked.class_type).toBe("SetLatentNoiseMask");
+    expect(follow(wf, masked.inputs.mask).inputs.value).toBe(0);
+    expect(one(wf, "ManualSigmas")[1].inputs.sigmas).toMatch(/^1\.0, /);
+    const video = one(wf, "CreateVideo")[1].inputs;
+    expect(follow(wf, video.images).class_type).toBe("ImageScale");
+    expect(byType(wf, "VAEDecodeTiled")).toHaveLength(0);
+    expect(runProblems({ ...restyle("wan22_t2v", t2v.model), addons: { source: { image: gif, strength: 0.6, output: "sound" } } }, parts)[0]).toMatch(/needs LTX-2.3/);
+  });
+
   it("says when a GIF doesn't fit the model", () => {
     const i2v = restyle("wan22_i2v", t2v.model);
     expect(runProblems(i2v, parts)[0]).toMatch(/animates a still picture/);

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { inputImageUrl, uploadImage, type Catalog, type LoraInfo } from "./comfy";
 import { controlnetsFor, faceDetectors, GUIDE_MODES, guideModeAvailable, type AddonChoices, type AddonKey } from "./addons";
 import type { Profile } from "./profiles";
-import { isAnimated, type InputImage } from "./workflow";
+import { isAnimated, type GifOutput, type InputImage } from "./workflow";
 
 function Toggle(props: { label: string; on: boolean; disabled?: boolean; onChange: (on: boolean) => void }) {
   return (
@@ -90,8 +90,29 @@ export function AddonCards(props: {
           />
           {a.source.image && props.profile?.video && isAnimated(a.source.image) && (
             <>
-              <Slider label="Change" value={a.source.strength} min={0.05} max={1} step={0.05} onChange={(strength) => set("source", { strength })} />
-              <p className="muted small note">Fletch restyles this GIF's frames with your prompt and saves a GIF.</p>
+              <div className="chips" role="group" aria-label="Make">
+                {(
+                  [
+                    ["gif", "GIF"],
+                    ["video", props.profile.video.audio ? "Video with sound" : "Video"],
+                    ...(props.profile.video.audio ? [["sound", "Add sound only"]] : []),
+                  ] as [GifOutput, string][]
+                ).map(([v, label]) => (
+                  <button key={v} className={(a.source.output ?? "gif") === v ? "chip on" : "chip"} onClick={() => set("source", { output: v })}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {a.source.output !== "sound" && (
+                <Slider label="Change" value={a.source.strength} min={0.05} max={1} step={0.05} onChange={(strength) => set("source", { strength })} />
+              )}
+              <p className="muted small note">
+                {a.source.output === "sound"
+                  ? "Keeps this GIF's picture exactly and makes a soundtrack for it from your prompt. Saves a video."
+                  : a.source.output === "video"
+                    ? `Restyles this GIF's frames with your prompt and saves a video${props.profile.video.audio ? " with sound" : ""}.`
+                    : "Restyles this GIF's frames with your prompt and saves a GIF."}
+              </p>
             </>
           )}
           {a.source.image && props.profile?.video && !isAnimated(a.source.image) && (

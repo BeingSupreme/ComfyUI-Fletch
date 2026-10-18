@@ -429,9 +429,9 @@ export function App() {
               Auto: {numbers.width} x {numbers.height}
               {profile.video &&
                 (gif
-                  ? `, restyling ${gifFrames(gif, numbers.seconds, frameStep(family!))} of the GIF's ${gif.frames} frames at ${gif.fps} fps`
+                  ? `, ${runAddons.source!.output === "sound" ? "adding sound to" : "restyling"} ${gifFrames(gif, numbers.seconds, frameStep(family!))} of the GIF's ${gif.frames} frames at ${gif.fps} fps`
                   : `, ${numbers.seconds}s at ${profile.video.fps} fps`)}
-              , {gif && profile.arch === "ltx23" ? ltxRestyleSigmas(runAddons.source!.strength).split(",").length - 1 : numbers.steps} steps, CFG {numbers.cfg}
+              , {gif && profile.arch === "ltx23" ? (runAddons.source!.output === "sound" ? 8 : ltxRestyleSigmas(runAddons.source!.strength).split(",").length - 1) : numbers.steps} steps, CFG {numbers.cfg}
               {speedLora && " (4-step speed LoRAs)"}
               {numbers.clipSkip > 1 && `, clip skip ${numbers.clipSkip}`}
               {profile.positivePrefix && ", adds quality tags"}

@@ -30,11 +30,11 @@ export function gifFrames(gif: InputImage, seconds: number, step: number): numbe
   return Math.floor((want - 1) / step) * step + 1;
 }
 
-/** The GIF's frames, trimmed and scaled to the size being made, then encoded as a video latent. */
-function gifLatent(g: Graph, gif: InputImage, frames: number, width: number, height: number, vae: Link): Link {
+/** The GIF's frames, trimmed and scaled to the size being made, and encoded as a video latent. */
+function gifLatent(g: Graph, gif: InputImage, frames: number, width: number, height: number, vae: Link): { pictures: Link; latent: Link } {
   const picked = g.add("ImageFromBatch", { image: [loadImage(g, gif), 0], batch_index: 0, length: frames });
-  const scaled = g.add("ImageScale", { image: [picked, 0], upscale_method: "lanczos", width, height, crop: "center" });
-  return [g.add("VAEEncode", { pixels: [scaled, 0], vae }), 0];
+  const pictures: Link = [g.add("ImageScale", { image: [picked, 0], upscale_method: "lanczos", width, height, crop: "center" }), 0];
+  return { pictures, latent: [g.add("VAEEncode", { pixels: pictures, vae }), 0] };
 }
 
 function saveGif(g: Graph, images: Link, fps: number, dest: Destination) {
@@ -80,7 +80,7 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
   const size = { width: r.width, height: r.height, length: r.frames, batch_size: 1 };
   let LATENT: Link;
   if (gif) {
-    LATENT = gifLatent(g, gif, gifFrames(gif, r.seconds, 4), r.width, r.height, VAE);
+    LATENT = gifLatent(g, gif, gifFrames(gif, r.seconds, 4), r.width, r.height, VAE).latent;
   } else if (p.latent === "EmptyHunyuanLatentVideo") {
     LATENT = [g.add("EmptyHunyuanLatentVideo", size), 0];
   } else if (v.experts) {
@@ -161,11 +161,11 @@ export function compileVideo(s: Settings, parts: Parts, nodes: NodeInfos = {}, d
   }
 
   const frames: Link = [g.add("VAEDecode", { samples: SAMPLES, vae: VAE }), 0];
-  if (gif) {
+  if (gif && s.addons?.source?.output !== "video") {
     saveGif(g, frames, gif.fps!, dest);
     return g.nodes;
   }
-  save(g, [g.add("CreateVideo", { ...nodeDefaults(nodes.CreateVideo), images: frames, fps: v.fps }), 0], nodes, dest);
+  save(g, [g.add("CreateVideo", { ...nodeDefaults(nodes.CreateVideo), images: frames, fps: gif ? gif.fps! : v.fps }), 0], nodes, dest);
   return g.nodes;
 }
 
@@ -218,7 +218,7 @@ export function compileLtx(s: Settings, parts: Parts, nodes: NodeInfos = {}, des
   const AUDIO_VAE: Link = [g.add("LTXVAudioVAELoader", { ckpt_name: ckpt }), 0];
   const CLIP: Link = [g.add("LTXAVTextEncoderLoader", { text_encoder: parts.gemma, ckpt_name: ckpt, device: "default" }), 0];
   const start = s.addons?.source?.image;
-  if (isAnimated(start)) return ltxRestyle(g, s, start!, { MODEL, VAE, AUDIO_VAE, CLIP }, dest);
+  if (isAnimated(start)) return ltxRestyle(g, s, start!, { MODEL, VAE, AUDIO_VAE, CLIP }, nodes, dest);
 
   const cond = g.add("LTXVConditioning", {
     positive: [g.add("CLIPTextEncode", { clip: CLIP, text: withPrefix(p.positivePrefix, s.positive) }), 0],
@@ -289,8 +289,17 @@ export function compileLtx(s: Settings, parts: Parts, nodes: NodeInfos = {}, des
 /**
  * LTX-2.3 video to video: the GIF's frames are encoded at full size and sampled once from
  * partway down the distilled schedule, so the motion stays and the look follows the prompt.
+ * To add sound only, the video is masked off so it stays as it is and only the sound is made.
  */
-function ltxRestyle(g: Graph, s: Settings, gif: InputImage, m: { MODEL: Link; VAE: Link; AUDIO_VAE: Link; CLIP: Link }, dest: Destination): ApiWorkflow {
+function ltxRestyle(
+  g: Graph,
+  s: Settings,
+  gif: InputImage,
+  m: { MODEL: Link; VAE: Link; AUDIO_VAE: Link; CLIP: Link },
+  nodes: NodeInfos,
+  dest: Destination,
+): ApiWorkflow {
+  const output = s.addons?.source?.output ?? "gif";
   const p = PROFILES[s.family];
   const r = resolve(s);
   const fps = gif.fps!;
@@ -301,22 +310,29 @@ function ltxRestyle(g: Graph, s: Settings, gif: InputImage, m: { MODEL: Link; VA
     frame_rate: fps,
   });
   const audio: Link = [g.add("LTXVEmptyLatentAudio", { audio_vae: m.AUDIO_VAE, frames_number: frames, frame_rate: fps, batch_size: 1 }), 0];
-  const latent: Link = [
-    g.add("LTXVConcatAVLatent", { video_latent: gifLatent(g, gif, frames, r.width, r.height, m.VAE), audio_latent: audio }),
-    0,
-  ];
+  const source = gifLatent(g, gif, frames, r.width, r.height, m.VAE);
+  const keep = output === "sound";
+  const video: Link = keep
+    ? [g.add("SetLatentNoiseMask", { samples: source.latent, mask: [g.add("SolidMask", { value: 0, width: r.width, height: r.height }), 0] }), 0]
+    : source.latent;
+  const latent: Link = [g.add("LTXVConcatAVLatent", { video_latent: video, audio_latent: audio }), 0];
   const sampled = g.add("SamplerCustomAdvanced", {
     noise: [g.add("RandomNoise", { noise_seed: s.seed }), 0],
     guider: [g.add("CFGGuider", { model: m.MODEL, positive: [cond, 0], negative: [cond, 1], cfg: r.cfg }), 0],
     sampler: [g.add("KSamplerSelect", { sampler_name: r.sampler }), 0],
-    sigmas: [g.add("ManualSigmas", { sigmas: ltxRestyleSigmas(s.addons!.source!.strength) }), 0],
+    sigmas: [g.add("ManualSigmas", { sigmas: keep ? LTX_SIGMAS_FIRST : ltxRestyleSigmas(s.addons!.source!.strength) }), 0],
     latent_image: latent,
   });
   const split = g.add("LTXVSeparateAVLatent", { av_latent: [sampled, 0] });
-  const images: Link = [
-    g.add("VAEDecodeTiled", { samples: [split, 0], vae: m.VAE, tile_size: 768, overlap: 64, temporal_size: 4096, temporal_overlap: 4 }),
-    0,
-  ];
-  saveGif(g, images, fps, dest);
+  // Sound only: the GIF's own frames go straight into the video, untouched by the VAE.
+  const images: Link = keep
+    ? source.pictures
+    : [g.add("VAEDecodeTiled", { samples: [split, 0], vae: m.VAE, tile_size: 768, overlap: 64, temporal_size: 4096, temporal_overlap: 4 }), 0];
+  if (output === "gif") {
+    saveGif(g, images, fps, dest);
+    return g.nodes;
+  }
+  const sound: Link = [g.add("LTXVAudioVAEDecode", { samples: [split, 1], audio_vae: m.AUDIO_VAE }), 0];
+  save(g, [g.add("CreateVideo", { ...nodeDefaults(nodes.CreateVideo), images, audio: sound, fps }), 0], nodes, dest);
   return g.nodes;
 }
